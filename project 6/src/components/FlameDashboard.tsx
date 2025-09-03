@@ -304,27 +304,109 @@ async function startPlanningWithSpeech() {
       if (e.data && e.data.size > 0) chunks.current.push(e.data);
     };
 
-    recorder.onstop = async () => {
-      setPlanningBusy(true);
-      try {
-        // 1) Audio → /api/stt (Whisper)
-        const blob = new Blob(chunks.current, { type: supportedMime });
-        const filename = supportedMime.includes("mp4") ? "speech.m4a" : "speech.webm";
+recorder.onstop = async () => {
+  setPlanningBusy(true);
+  try {
+    // Blob aus Chunks bauen
+    const blob = new Blob(chunks.current, { type: pickSupportedMime() || "audio/webm" });
+    const filename = (blob.type || "").includes("mp4") ? "speech.m4a" : "speech.webm";
 
-        const fd = new FormData();
-        fd.append("file", blob, filename);
+    // === 1) STT anrufen (Netlify Function via Redirect /api/stt) ===
+    const fd = new FormData();
+    fd.append("file", blob, filename);
 
-        const sttCtrl = new AbortController();
-        const sttTO = window.setTimeout(() => sttCtrl.abort(), 35_000);
+    const sttCtrl = new AbortController();
+    const sttTO = window.setTimeout(() => sttCtrl.abort(), 35000);
 
-        const sttRes = await fetch(api("/api/stt"), {
-          method: "POST",
-          body: fd,
-          signal: sttCtrl.signal,
-        }).catch(() => {
-          throw new Error("STT Netzfehler");
-        });
-        window.clearTimeout(sttTO);
+    const sttRes = await fetch("/api/stt", {
+      method: "POST",
+      body: fd,
+      signal: sttCtrl.signal,
+    }).catch(() => {
+      throw new Error("STT Netzfehler");
+    });
+
+    window.clearTimeout(sttTO);
+
+    // Fallback: manuelle Texteingabe, wenn STT scheitert
+    const fallbackToTextPlan = async () => {
+      const desc = window.prompt("Konnte Sprache nicht erkennen. Bitte beschreibe kurz deinen Tag:");
+      if (!desc || !desc.trim()) return;
+      const planRes = await fetch("/api/plan/day", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ description: desc }),
+      });
+      if (!planRes.ok) throw new Error(await planRes.text().catch(() => "plan/day failed"));
+      const planJson = await planRes.json().catch(() => ({} as any));
+      const raw = Array.isArray(planJson?.events) ? planJson.events : [];
+      const events = raw.map((ev: any) => ({
+        id: `plan-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+        title: String(ev?.title || "Aufgabe"),
+        time: ev?.start
+          ? new Date(ev.start).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })
+          : "09:00",
+        category: String(ev?.category || "wisdom"),
+        completed: false,
+        description: ev?.location || undefined,
+        date: new Date().toISOString().slice(0, 10),
+        reminderMinutes: 30,
+      }));
+      onPlanGenerated?.(events);
+    };
+
+    if (!sttRes.ok) {
+      console.warn("[/api/stt] failed:", sttRes.status, await sttRes.text().catch(() => ""));
+      await fallbackToTextPlan();
+      return;
+    }
+
+    const sttJson = await sttRes.json().catch(() => ({} as any));
+    const transcript = String(sttJson?.text || "").trim();
+    if (!transcript) {
+      await fallbackToTextPlan();
+      return;
+    }
+
+    // === 2) Text → Plan (Netlify Function /api/plan/day) ===
+    const planRes = await fetch("/api/plan/day", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ description: transcript }),
+    });
+    if (!planRes.ok) throw new Error(await planRes.text().catch(() => "plan/day failed"));
+
+    const planJson = await planRes.json().catch(() => ({} as any));
+    const raw = Array.isArray(planJson?.events) ? planJson.events : [];
+    const events = raw.map((ev: any) => {
+      const title = String(ev?.title || "Aufgabe");
+      const time = ev?.start
+        ? new Date(ev.start).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })
+        : "09:00";
+      const category = String(ev?.category || "wisdom");
+      return {
+        id: `plan-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+        title,
+        time,
+        category,
+        completed: false,
+        description: ev?.location || undefined,
+        date: new Date().toISOString().slice(0, 10),
+        reminderMinutes: 30,
+      };
+    });
+
+    if (events.length) onPlanGenerated?.(events);
+  } catch (err) {
+    console.error("Plan generation error:", err);
+    alert("Fehler beim Erstellen des Plans.");
+  } finally {
+    setPlanningBusy(false);
+    try { streamRef.current?.getTracks().forEach((t) => t.stop()); } catch {}
+    streamRef.current = null;
+    setRecording(false);
+  }
+};
 
         // Fallback: manuelle Texteingabe, falls STT scheitert
         const fallbackToTextPlan = async () => {
