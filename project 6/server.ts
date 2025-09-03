@@ -10,13 +10,25 @@ import type { PushSubscription } from 'web-push';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import OpenAI from 'openai';
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || '' });
+// --- Inline-config (allows hardcoded fallback keys when env vars are missing)
+const CONFIG = {
+  OPENAI_API_KEY: process.env.OPENAI_API_KEY || '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',
+  GOOGLE_API_KEY: process.env.GOOGLE_API_KEY || 'AIzaSyD-9tSrQWn_ZPybkST863oWSp3pzDxOK30',
+  GOOGLE_GEMINI_MODEL: process.env.GOOGLE_GEMINI_MODEL || 'gemini-1.5-flash',
+};
+
+const openai = CONFIG.OPENAI_API_KEY ? new OpenAI({ apiKey: CONFIG.OPENAI_API_KEY }) : null;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = Number(process.env.PORT ?? 1234);
+
+console.log('[startup] PORT=', PORT);
+console.log('[startup] OPENAI key present:', !!CONFIG.OPENAI_API_KEY);
+console.log('[startup] GOOGLE key present:', !!CONFIG.GOOGLE_API_KEY);
+console.log('[startup] GEMINI model:', CONFIG.GOOGLE_GEMINI_MODEL);
 
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
@@ -54,6 +66,14 @@ function getUserPrefs(userId: string): Prefs {
 
 // Health
 app.get('/api/health', (_req, res) => res.json({ ok: true, port: PORT }));
+// Key presence (ohne Secrets zu leaken)
+app.get('/api/health/keys', (_req, res) => {
+  res.json({
+    hasOpenAI: !!CONFIG.OPENAI_API_KEY,
+    hasGoogle: !!CONFIG.GOOGLE_API_KEY,
+    model: CONFIG.GOOGLE_GEMINI_MODEL,
+  });
+});
 
 // Posters (optional helper)
 app.get('/api/posters', async (_req, res) => {
@@ -133,7 +153,9 @@ app.post('/api/push/send', async (req, res) => {
 
 // --- STT: Provider-Funktionen
 async function transcribeWithWhisper(buf: Buffer, filename: string, mime: string): Promise<string> {
-  const file = new File([buf], filename, { type: mime || 'audio/webm' });
+  if (!openai) throw new Error('OpenAI not configured');
+  const NodeFile: any = (global as any).File || (await import('undici')).File;
+  const file = new NodeFile([buf], filename, { type: mime || 'audio/webm' });
   const resp = await openai.audio.transcriptions.create({
     file,
     model: 'whisper-1',
@@ -142,13 +164,17 @@ async function transcribeWithWhisper(buf: Buffer, filename: string, mime: string
   return String((resp as any).text || '').trim();
 }
 
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || '');
-const geminiStt = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-const geminiPlan = genAI.getGenerativeModel({
-  model: process.env.GOOGLE_GEMINI_MODEL || 'gemini-1.5-flash',
-  generationConfig: { temperature: 0.3, maxOutputTokens: 900, responseMimeType: 'application/json' },
-});
+const genAI = CONFIG.GOOGLE_API_KEY ? new GoogleGenerativeAI(CONFIG.GOOGLE_API_KEY) : null;
+const geminiStt = genAI ? genAI.getGenerativeModel({ model: 'gemini-1.5-flash' }) : null;
+const geminiPlan = genAI
+  ? genAI.getGenerativeModel({
+      model: CONFIG.GOOGLE_GEMINI_MODEL,
+      generationConfig: { temperature: 0.3, maxOutputTokens: 900, responseMimeType: 'application/json' },
+    })
+  : null;
+
 async function transcribeWithGemini(buf: Buffer, mime: string): Promise<string> {
+  if (!geminiStt) throw new Error('Gemini not configured');
   const b64 = buf.toString('base64');
   const resp = await geminiStt.generateContent({
     contents: [{ role: 'user', parts: [{ text: 'Transkribiere präzise auf Deutsch.' }, { inlineData: { data: b64, mimeType: mime } }] }],
@@ -164,15 +190,19 @@ async function sttHandler(req: any, res: any) {
     const name = req.file.originalname || 'audio.webm';
 
     let text = '';
-    if (process.env.OPENAI_API_KEY) {
+    if (CONFIG.OPENAI_API_KEY) {
       try {
         text = await transcribeWithWhisper(req.file.buffer, name, mime);
       } catch (e: any) {
         console.warn('[stt] whisper failed, trying gemini:', e?.message || e);
       }
     }
-    if (!text && process.env.GOOGLE_API_KEY) {
-      text = await transcribeWithGemini(req.file.buffer, mime);
+    if (!text && CONFIG.GOOGLE_API_KEY) {
+      try {
+        text = await transcribeWithGemini(req.file.buffer, mime);
+      } catch (e: any) {
+        console.warn('[stt] gemini failed:', e?.message || e);
+      }
     }
     if (!text) {
       return res.status(501).json({ error: 'Kein STT Provider konfiguriert (OPENAI_API_KEY/GOOGLE_API_KEY).' });
@@ -238,6 +268,8 @@ Regeln:
 Nutzer-Notizen:
 ${userText}
 `;
+
+  if (!geminiPlan) throw new Error('Gemini not configured');
 
   const resp = await geminiPlan.generateContent({
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
@@ -342,20 +374,20 @@ app.post('/api/plan/from-speech', upload.single('file'), async (req, res) => {
     const mime = req.file.mimetype || 'audio/webm';
     const name = req.file.originalname || 'audio.webm';
     let text = '';
-    if (process.env.OPENAI_API_KEY) {
+    if (CONFIG.OPENAI_API_KEY) {
       try {
         text = await transcribeWithWhisper(req.file.buffer, name, mime);
       } catch (e: any) {
         console.warn('[from-speech] whisper failed, trying gemini:', e?.message || e);
       }
     }
-    if (!text && process.env.GOOGLE_API_KEY) {
+    if (!text && CONFIG.GOOGLE_API_KEY) {
       text = await transcribeWithGemini(req.file.buffer, mime);
     }
     if (!text) return res.status(501).json({ error: 'Kein STT Provider konfiguriert.' });
 
     // 2) Plan (Gemini)
-    if (!process.env.GOOGLE_API_KEY) return res.status(501).json({ error: 'Gemini Planner nicht konfiguriert.' });
+    if (!CONFIG.GOOGLE_API_KEY) return res.status(501).json({ error: 'Gemini Planner nicht konfiguriert.' });
     let plan: NextDayPlan;
     try {
       plan = await generateNextDayPlan(text, {
@@ -447,14 +479,14 @@ async function start() {
     app.use(express.static(dist));
     app.get('*', (_req, res) => res.sendFile(path.join(dist, 'index.html')));
   }
-  app.listen(PORT, () => console.log(`Dev server up on http://localhost:${PORT}`));
+  app.listen(PORT, '0.0.0.0', () => console.log(`Server listening on 0.0.0.0:${PORT}`));
 }
 start();
 
 // --- Text → Plan (Gemini)
 app.post('/api/plan/day', async (req, res) => {
   try {
-    if (!process.env.GOOGLE_API_KEY) return res.status(501).json({ error: 'Gemini nicht konfiguriert.' });
+    if (!CONFIG.GOOGLE_API_KEY) return res.status(501).json({ error: 'Gemini nicht konfiguriert.' });
     const description = String(req.body?.description || '').trim();
     if (!description) return res.status(400).json({ error: 'description required' });
 
