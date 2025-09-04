@@ -1,57 +1,46 @@
-import type { Handler } from '@netlify/functions'
-import OpenAI from 'openai'
+import type { Handler } from "@netlify/functions";
+import parser from "lambda-multipart-parser";
+import OpenAI from "openai";
 
+// Whisper STT via OpenAI
 export const handler: Handler = async (event) => {
   try {
-    if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed' }
-    if (!process.env.OPENAI_API_KEY) return { statusCode: 501, body: 'OPENAI_API_KEY fehlt' }
+    if (!process.env.OPENAI_API_KEY) {
+      return { statusCode: 501, body: JSON.stringify({ error: "OPENAI_API_KEY fehlt" }) };
+    }
+    // multipart/form-data parsen (FormData mit "file")
+    const result = await parser.parse(event);
+    const file = (result.files || [])[0];
 
-    // multipart/form-data auslesen
-    const contentType = event.headers['content-type'] || event.headers['Content-Type'] || ''
-    if (!contentType.includes('multipart/form-data')) {
-      return { statusCode: 400, body: 'multipart/form-data erwartet (field "file")' }
+    if (!file || !file.content) {
+      return { statusCode: 400, body: JSON.stringify({ error: 'Kein Audio. Feld muss "file" heißen.' }) };
     }
 
-    // Netlify stellt den rohen Body als Base64 bereit:
-    const raw = Buffer.from(event.body || '', 'base64')
-    // simple boundary split (für kleine Uploads ok)
-    const boundary = contentType.split('boundary=')[1]
-    if (!boundary) return { statusCode: 400, body: 'boundary fehlt' }
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-    const parts = raw.toString('binary').split(`--${boundary}`)
-    const filePart = parts.find(p => p.includes('name="file"'))
-    if (!filePart) return { statusCode: 400, body: 'file fehlt' }
-
-    const headerEnd = filePart.indexOf('\r\n\r\n')
-    const fileBinary = filePart.slice(headerEnd + 4, filePart.lastIndexOf('\r\n'))
-    const buf = Buffer.from(fileBinary, 'binary')
-
-    const filenameMatch = /filename="([^"]+)"/.exec(filePart)
-    const filename = filenameMatch?.[1] || 'audio.webm'
-    const mimeMatch = /Content-Type:\s*([^\r\n]+)/i.exec(filePart)
-    const mime = mimeMatch?.[1] || 'audio/webm'
-
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
-    // Node: File aus undici verwenden
-    const { File } = await import('undici')
-    const file = new File([buf], filename, { type: mime })
+    // Node 18+/22 hat global File/Blob meist schon; falls nicht, aus undici holen
+    // @ts-ignore
+    const NodeFile = (global as any).File ?? (await import("undici")).File;
+    const blob = new Blob([file.content], { type: file.contentType || "audio/webm" });
+    const up = new NodeFile([blob], file.filename || "speech.webm", { type: file.contentType || "audio/webm" });
 
     const resp = await openai.audio.transcriptions.create({
-      file,
-      model: 'whisper-1',
+      file: up,
+      model: "whisper-1",
       temperature: 0,
-    })
+    });
 
-    const text = String((resp as any).text || '').trim()
-    if (!text) return { statusCode: 422, body: JSON.stringify({ error: 'Kein Text erkennbar.' }) }
-
+    const text = String((resp as any).text || "").trim();
+    if (!text) {
+      return { statusCode: 422, body: JSON.stringify({ error: "Kein Text erkennbar." }) };
+    }
     return {
       statusCode: 200,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
-    }
+    };
   } catch (e: any) {
-    console.error('stt error', e)
-    return { statusCode: 500, body: e?.message || 'stt failed' }
+    console.error("[stt] error", e);
+    return { statusCode: Number(e?.status) || 500, body: JSON.stringify({ error: e?.message || "stt failed" }) };
   }
-}
+};
