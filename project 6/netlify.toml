@@ -1,21 +1,20 @@
 [build]
-  command = "npm run build"
-  publish = "dist"
+  command   = "npm run build"
+  publish   = "dist"
   functions = "netlify/functions"
 
-# API → Functions
 [[redirects]]
   from = "/api/stt"
-  to = "/.netlify/functions/stt"
+  to   = "/.netlify/functions/stt"
   status = 200
 
 [[redirects]]
   from = "/api/plan/day"
-  to = "/.netlify/functions/plan-day"
+  to   = "/.netlify/functions/plan-day"
   status = 200
 
-# SPA Routing
+# SPA-Fallback
 [[redirects]]
   from = "/*"
-  to = "/index.html"
+  to   = "/index.html"
   status = 200
