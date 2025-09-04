@@ -11,6 +11,7 @@
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "@radix-ui/react-slot": "^1.2.3",
+    "lambda-multipart-parser": "^1.0.1",
     "class-variance-authority": "^0.7.1",
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",
