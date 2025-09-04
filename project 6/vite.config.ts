@@ -1,8 +1,7 @@
-import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
-import path from 'path';
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+import path from 'path'
 
-// https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
   resolve: {
@@ -13,8 +12,14 @@ export default defineConfig({
   optimizeDeps: {
     exclude: ['lucide-react'],
   },
-  server: {
-    host: true,      // 👈 erlaubt Zugriff von externen Hosts (ngrok, LAN usw.)
-    port: 5177,      // dein Dev-Port
+  // ⚠️ Wir bauen für Netlify in "dist"
+  build: {
+    outDir: 'dist',
+    sourcemap: false,
   },
-});
+  // Nur für lokales Dev – Netlify benutzt das NICHT
+  server: {
+    host: true,
+    port: 5177,
+  },
+})
