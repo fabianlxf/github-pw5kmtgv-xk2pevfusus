@@ -3,11 +3,18 @@
   publish = "dist"
   functions = "netlify/functions"
 
+# API → Functions
 [[redirects]]
-  from = "/api/*"
-  to = "/.netlify/functions/server"
+  from = "/api/stt"
+  to = "/.netlify/functions/stt"
   status = 200
 
+[[redirects]]
+  from = "/api/plan/day"
+  to = "/.netlify/functions/plan-day"
+  status = 200
+
+# SPA Routing
 [[redirects]]
   from = "/*"
   to = "/index.html"
