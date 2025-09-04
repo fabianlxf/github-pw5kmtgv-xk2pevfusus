@@ -1,9 +1,0 @@
-[build]
-  command = "npm run build"
-  publish = "dist"
-
-# SPA-Fallback (damit deine React-Routen wie /reports nicht 404 geben)
-[[redirects]]
-  from = "/*"
-  to = "/index.html"
-  status = 200
