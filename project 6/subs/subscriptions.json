@@ -1,0 +1,1 @@
+{ "subs": [ { "endpoint":"...", "keys": { "p256dh":"...", "auth":"..." }, "userId":"demo-user" } ] }
