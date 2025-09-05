@@ -60,12 +60,18 @@ const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
 const api = (path: string) => `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
 console.log('[FlameDashboard] API_BASE =', API_BASE || '(empty)');
 
-// Intelligenter API-Caller: versucht zuerst /api/* (Redirect), fällt bei 404/HTML auf /.netlify/functions/* zurück
+// Explizites Mapping von SPA-Pfaden ("/api/*") zu Netlify Functions ("/.netlify/functions/*")
+const FN_MAP: Record<string, string> = {
+  "/api/stt": "/.netlify/functions/stt",
+  "/api/plan/day": "/.netlify/functions/plan-day",
+  "/api/plan/from-speech": "/.netlify/functions/plan-from-speech",
+};
+
+// Intelligenter API-Caller: versucht zuerst /api/* (Redirect), fällt bei 404/HTML auf /.netlify/functions/* zurück (mit Mapping)
 async function callApi(inputPath: string, init?: RequestInit): Promise<Response> {
   const primary = `${API_BASE}${inputPath}`;
-  // Ensure we always send an Accept header, but don't override user-supplied headers
   const headers = new Headers(init?.headers || {});
-  if (!headers.has('accept')) headers.set('accept', 'application/json, */*');
+  if (!headers.has("accept")) headers.set("accept", "application/json, */*");
 
   let res: Response | undefined;
   try {
@@ -74,20 +80,16 @@ async function callApi(inputPath: string, init?: RequestInit): Promise<Response>
     res = undefined;
   }
 
-  const contentType = res?.headers?.get('content-type') || '';
-  const looksHtml = contentType.includes('text/html');
+  const contentType = res?.headers?.get("content-type") || "";
+  const looksHtml = contentType.includes("text/html");
 
-  // If primary is missing (404) or returns HTML (SPA fallback), try Netlify Functions path
   if (!res || res.status === 404 || looksHtml) {
-    const fnPath = inputPath.replace(/^\/api\//, '/.netlify/functions/');
-    const fallback = `${API_BASE}${fnPath}`;
-    try {
-      res = await fetch(fallback, { ...init, headers });
-    } catch (e) {
-      // surface network errors
-      throw e;
-    }
+    const mapped = FN_MAP[inputPath] || inputPath.replace(/^\/api\//, "/.netlify/functions/");
+    const fallback = `${API_BASE}${mapped}`;
+    console.warn(`[callApi] 404/HTML on ${primary}, trying fallback ${fallback}`);
+    res = await fetch(fallback, { ...init, headers });
   }
+
   return res!;
 }
 
