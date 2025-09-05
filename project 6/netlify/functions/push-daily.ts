@@ -1,64 +1,117 @@
+// netlify/functions/push-daily.ts
 import type { Handler } from "@netlify/functions";
+import { getStore, list } from "@netlify/blobs";
 import webpush from "web-push";
-import { getStore } from "@netlify/blobs";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
-const TIPS = [
-  "Trinke direkt nach dem Aufstehen 300–500 ml Wasser.",
-  "Kurze Mobility: 5× Schulterkreisen + 5× Hüftkreisen.",
-  "10 Minuten zügig spazieren nach dem Mittagessen.",
-  "Abends 5 Minuten leichtes Stretching für besseren Schlaf."
-];
+type PrefFile = {
+  userId: string;
+  wishText: string;
+  times: string[];   // ["08:00","18:00"]
+  tz: string;        // "Europe/Berlin"
+};
 
-const BIBLE_VERSES = [
-  { ref: "Psalm 23,1", text: "Der Herr ist mein Hirte; mir wird nichts mangeln." },
-  { ref: "Matthäus 5,9", text: "Selig sind die Friedfertigen; denn sie werden Gottes Kinder heißen." },
-  { ref: "Philipper 4,13", text: "Ich vermag alles durch den, der mich mächtig macht: Christus." }
-];
+type PushSub = {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+  userId: string;
+};
 
-function pick<T>(arr: T[]): T {
-  return arr[Math.floor(Math.random() * arr.length)];
+const genAI = process.env.GOOGLE_API_KEY
+  ? new GoogleGenerativeAI(process.env.GOOGLE_API_KEY)
+  : null;
+
+webpush.setVapidDetails(
+  "mailto:you@example.com",
+  process.env.VAPID_PUBLIC_KEY || "",
+  process.env.VAPID_PRIVATE_KEY || ""
+);
+
+function nowInTZ(tz: string) {
+  const fmt = new Intl.DateTimeFormat("en-GB", {
+    timeZone: tz,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const parts = Object.fromEntries(
+    fmt.formatToParts(new Date()).map((p) => [p.type, p.value])
+  );
+  return `${parts.hour}:${parts.minute}`;
+}
+
+async function generateTip(wishText: string): Promise<string> {
+  if (!genAI) return "Täglicher Impuls.";
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+  const prompt = `
+Erzeuge einen sehr kurzen, motivierenden Impuls (max. 2 Sätze, <= 220 Zeichen) zum Thema:
+"${wishText}".
+
+Format:
+- Kein Disclaimer, keine Emojis, keine Einleitung.
+- Direkt der Inhalt, knackig, alltagsnah.
+  `.trim();
+
+  const r = await model.generateContent(prompt);
+  const text = (r.response.text() || "").trim();
+  return text || "Bleib dran – ein kleiner Schritt zählt.";
 }
 
 export const handler: Handler = async () => {
-  const { VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT } = process.env as Record<string,string>;
-  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY || !VAPID_SUBJECT) {
-    return { statusCode: 500, body: "VAPID keys/subject missing" };
+  try {
+    // 1) Alle Pref-Files holen
+    const prefsStore = getStore({ name: "prefs" });
+    const listed = await list({ prefix: "prefs/" }); // listet alle keys in diesem Namespace
+    const prefKeys = listed.blobs.map((b) => b.key);
+
+    // 2) Jetztige Zeit je User-TZ prüfen + ggf. pushen
+    const subsStore = getStore({ name: "subs" }); // hier liegen Push-Subscriptions userweise
+    let pushed = 0;
+
+    for (const key of prefKeys) {
+      const pref = (await prefsStore.getJSON(key)) as PrefFile | null;
+      if (!pref) continue;
+
+      const localNowHHMM = nowInTZ(pref.tz || "Europe/Berlin");
+      const shouldSend = (pref.times || ["08:00"]).some((t) => t === localNowHHMM);
+      if (!shouldSend) continue;
+
+      // Gemini-Text erzeugen
+      const body = await generateTip(pref.wishText || "Täglicher Fokus-Impuls");
+
+      // Subscriptions des Users laden (einfaches Beispiel: eine JSON-Datei pro User)
+      const subKey = `subs/${pref.userId}.json`;
+      const subJson = (await subsStore.getJSON(subKey)) as { subs: PushSub[] } | null;
+      const subs = subJson?.subs || [];
+      if (!subs.length) continue;
+
+      // Push senden
+      await Promise.all(
+        subs.map(async (s) => {
+          try {
+            await webpush.sendNotification(
+              { endpoint: s.endpoint, keys: s.keys } as any,
+              JSON.stringify({
+                title: "Dein täglicher Impuls",
+                body,
+                url: "/plan", // Zielseite in deiner App
+              })
+            );
+            pushed++;
+          } catch (e) {
+            console.warn("[push] failed for", s.endpoint, e);
+          }
+        })
+      );
+    }
+
+    return {
+      statusCode: 200,
+      body: JSON.stringify({ ok: true, pushed }),
+    };
+  } catch (e: any) {
+    console.error("[push-daily] error", e);
+    return { statusCode: 500, body: JSON.stringify({ error: e?.message || "failed" }) };
   }
-  webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
-
-  const store = getStore({ name: "push-subs" });
-  const subs = (await store.get("subscriptions.json", { type: "json" })) as any[] | null;
-  if (!Array.isArray(subs) || subs.length === 0) {
-    return { statusCode: 200, body: "no subscriptions" };
-  }
-
-  const tip = pick(TIPS);
-  const verse = pick(BIBLE_VERSES);
-
-  // 1) Morgens 08:00: Bibelvers (requireInteraction=true hält die Noti „dauerhaft“ sichtbar)
-  const versePayload = JSON.stringify({
-    title: `📖 Tagesvers (${verse.ref})`,
-    body: verse.text,
-    requireInteraction: true,
-    data: { url: "/#bible" }
-  });
-
-  // 2) Später am Tag: Fitness-Tipp
-  const tipPayload = JSON.stringify({
-    title: "💪 Tipp des Tages",
-    body: tip,
-    data: { url: "/#tip" }
-  });
-
-  const sendAll = async (payload: string) => {
-    await Promise.allSettled(
-      subs.map(s => webpush.sendNotification(s, payload).catch(() => null))
-    );
-  };
-
-  // Wir schicken hier beide direkt; wenn du exakte Uhrzeiten willst, lege 2 getrennte Scheduled Functions an.
-  await sendAll(versePayload);
-  await sendAll(tipPayload);
-
-  return { statusCode: 200, body: "pushed" };
 };
