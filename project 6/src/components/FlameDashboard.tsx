@@ -60,6 +60,97 @@ const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
 const api = (path: string) => `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
 console.log('[FlameDashboard] API_BASE =', API_BASE || '(empty)');
 
+// VAPID Public Key for Web Push (Base64URL). Set this in your environment: VITE_VAPID_PUBLIC_KEY
+const VAPID_PUBLIC = (import.meta.env.VITE_VAPID_PUBLIC_KEY || "").trim();
+
+// Helper: convert Base64URL string to Uint8Array (needed for applicationServerKey)
+function urlBase64ToUint8Array(base64String: string) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) outputArray[i] = rawData.charCodeAt(i);
+  return outputArray;
+}
+
+// Service Worker registration
+async function registerSW() {
+  if (!("serviceWorker" in navigator)) return null;
+  try {
+    const reg = await navigator.serviceWorker.register("/sw.js");
+    console.log("[push] SW registered:", reg);
+    return reg;
+  } catch (e) {
+    console.warn("[push] SW registration failed", e);
+    return null;
+  }
+}
+
+// Get existing push subscription (if any)
+async function getExistingSubscription(): Promise<PushSubscription | null> {
+  const reg = await navigator.serviceWorker.getRegistration();
+  if (!reg) return null;
+  return reg.pushManager.getSubscription();
+}
+
+// Subscribe for push and send subscription to backend
+async function enablePushOnBackend(sub: PushSubscription) {
+  try {
+    const res = await callApi("/api/subscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(sub),
+    });
+    if (!res.ok) {
+      console.warn("[push] /api/subscribe failed", await res.text().catch(() => ""));
+    }
+  } catch (e) {
+    console.warn("[push] subscribe backend error", e);
+  }
+}
+
+async function subscribeForPush(): Promise<PushSubscription | null> {
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+    alert("Push-Benachrichtigungen werden von deinem Browser nicht unterstützt.");
+    return null;
+  }
+  if (!VAPID_PUBLIC) {
+    alert("VAPID Public Key fehlt (VITE_VAPID_PUBLIC_KEY).");
+    return null;
+  }
+  const reg = (await navigator.serviceWorker.getRegistration()) || (await registerSW());
+  if (!reg) return null;
+
+  const permission = await Notification.requestPermission();
+  if (permission !== "granted") {
+    alert("Benachrichtigungen wurden nicht erlaubt.");
+    return null;
+  }
+
+  const existing = await reg.pushManager.getSubscription();
+  if (existing) {
+    console.log("[push] already subscribed");
+    await enablePushOnBackend(existing);
+    return existing;
+  }
+
+  const sub = await reg.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC),
+  });
+  console.log("[push] subscribed", sub);
+  await enablePushOnBackend(sub);
+  return sub;
+}
+
+async function unsubscribePush() {
+  const sub = await getExistingSubscription();
+  if (!sub) return false;
+  await sub.unsubscribe();
+  console.log("[push] unsubscribed");
+  return true;
+}
+
 
 // Explizites Mapping von SPA-Pfaden ("/api/*") zu Netlify Functions ("/.netlify/functions/*")
 const FN_MAP: Record<string, string> = {
@@ -133,6 +224,37 @@ export default function FlameDashboard({
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunks = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
+
+  const [pushSupported, setPushSupported] = useState<boolean>(false);
+  const [notifEnabled, setNotifEnabled] = useState<boolean>(false);
+  const [checkingPush, setCheckingPush] = useState<boolean>(true);
+
+  React.useEffect(() => {
+    const support = "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+    setPushSupported(support);
+    (async () => {
+      if (!support) return setCheckingPush(false);
+      // Ensure SW is registered (idempotent)
+      await registerSW();
+      const sub = await getExistingSubscription();
+      setNotifEnabled(!!sub);
+      setCheckingPush(false);
+    })();
+  }, []);
+
+  async function handleEnableNotifications() {
+    setCheckingPush(true);
+    const sub = await subscribeForPush();
+    setNotifEnabled(!!sub);
+    setCheckingPush(false);
+  }
+
+  async function handleDisableNotifications() {
+    setCheckingPush(true);
+    await unsubscribePush();
+    setNotifEnabled(false);
+    setCheckingPush(false);
+  }
 
   const backgroundImages: Record<string, string> = {
     fitness: "/posters/fitness.png",
@@ -583,6 +705,19 @@ function stopRecording() {
         >
           {isDarkMode ? <Sun className="w-6 h-6" /> : <Moon className="w-6 h-6" />}
         </button>
+        {/* Push Notification Toggle */}
+        {pushSupported && (
+          <button
+            onClick={notifEnabled ? handleDisableNotifications : handleEnableNotifications}
+            disabled={checkingPush}
+            className={`ml-3 p-3 rounded-2xl transition-all duration-300 ${
+              isDarkMode ? "bg-white/10 hover:bg-white/20 text-white" : "bg-black/10 hover:bg-black/20 text-black"
+            } backdrop-blur-md shadow-lg hover:scale-105 disabled:opacity-50`}
+            title={notifEnabled ? "Benachrichtigungen deaktivieren" : "Benachrichtigungen aktivieren"}
+          >
+            {checkingPush ? "…" : notifEnabled ? "🔔" : "🔕"}
+          </button>
+        )}
       </div>
 
       {/* Live Task */}
@@ -768,6 +903,12 @@ function stopRecording() {
               </button>
             </div>
             <p className={`text-sm mb-4 ${isDarkMode ? "text-white/70" : "text-gray-600"}`}>Aufnahme läuft... Klicken zum Stoppen</p>
+            {/* Info hint for notifications */}
+            {pushSupported && !notifEnabled && (
+              <div className={`text-xs text-center ${isDarkMode ? "text-white/60" : "text-gray-600"}`}>
+                Tipp: Aktiviere 🔔 Benachrichtigungen oben, damit Live-Tasks &amp; Daily-Tipps auch im Hintergrund ankommen.
+              </div>
+            )}
             <button
               onClick={stopRecording}
               className={`px-4 py-2 rounded-xl transition-colors ${
