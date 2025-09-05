@@ -60,6 +60,22 @@ const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
 const api = (path: string) => `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
 console.log('[FlameDashboard] API_BASE =', API_BASE || '(empty)');
 
+// --- Image preload + fallback so background posters don't show a broken icon (esp. Safari) ---
+const preloadCache = new Map<string, boolean>();
+function ensureImage(url?: string): string | undefined {
+  if (!url) return undefined;
+  if (preloadCache.has(url)) return preloadCache.get(url) ? url : "/posters/fallback.jpg";
+  try {
+    const img = new Image();
+    img.onload = () => preloadCache.set(url, true);
+    img.onerror = () => preloadCache.set(url, false);
+    img.src = url;
+  } catch {
+    preloadCache.set(url, false);
+  }
+  return url; // first render triggers load; next renders use cache result
+}
+
 // Explizites Mapping von SPA-Pfaden ("/api/*") zu Netlify Functions ("/.netlify/functions/*")
 const FN_MAP: Record<string, string> = {
   "/api/stt": "/.netlify/functions/stt",
@@ -894,7 +910,11 @@ function stopRecording() {
                 className="relative overflow-hidden rounded-3xl h-36 group cursor-pointer transform transition-all duration-500 hover:scale-[1.08] hover:shadow-2xl hover:-translate-y-3 perspective-1000"
                 onClick={() => onCategoryClick?.(c.id)}
                 style={{
-                  backgroundImage: c.backgroundImage ? `url("${encodeURI(c.backgroundImage)}")` : undefined,
+                  // preload + fallback to avoid broken poster icons
+                  backgroundImage: (() => {
+                    const bgUrl = ensureImage(backgroundImages[c.id as keyof typeof backgroundImages]);
+                    return bgUrl ? `url("${encodeURI(bgUrl)}")` : undefined;
+                  })(),
                   backgroundSize: "cover",
                   backgroundPosition: c.id === "wisdom" || c.id === "mindset" ? "50% 80%" : "center",
                   transform: "rotateX(5deg) rotateY(-5deg)",
@@ -1034,6 +1054,8 @@ function stopRecording() {
       </div>
 
       <div className="h-32"></div>
+
+      {/* NOTE: Provide /public/posters/fallback.jpg to use as image fallback */}
 
       <style jsx>{`
         @keyframes flameIntense {
