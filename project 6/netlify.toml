@@ -1,6 +1,5 @@
-# netlify.toml
-
 [build]
+  base = "project 6"   # wichtig, sonst sucht Netlify im Root
   command = "npm run build"
   publish = "dist"
   functions = "netlify/functions"
@@ -32,6 +31,6 @@
   to = "/index.html"
   status = 200
 
-# Scheduled Function (läuft stündlich, UTC-Zeit)
+# Scheduled (UTC!): jede Stunde
 [functions."push-daily"]
   schedule = "0 * * * *"
