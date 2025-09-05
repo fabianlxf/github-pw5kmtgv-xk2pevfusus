@@ -1,8 +1,11 @@
+# netlify.toml
+
 [build]
   command = "npm run build"
   publish = "dist"
   functions = "netlify/functions"
 
+# API-Redirects
 [[redirects]]
   from = "/api/stt"
   to = "/.netlify/functions/stt"
@@ -19,18 +22,6 @@
   status = 200
 
 [[redirects]]
-  from = "/*"
-  to = "/index.html"
-  status = 200
-# netlify.toml
-
-[build]
-  command = "npm run build"
-  publish = "dist"
-  functions = "netlify/functions"
-
-# API-Redirects
-[[redirects]]
   from = "/api/set-preferences"
   to = "/.netlify/functions/set-preferences"
   status = 200
@@ -41,6 +32,6 @@
   to = "/index.html"
   status = 200
 
-# Scheduled (UTC!): jede Stunde
+# Scheduled Function (läuft stündlich, UTC-Zeit)
 [functions."push-daily"]
   schedule = "0 * * * *"
