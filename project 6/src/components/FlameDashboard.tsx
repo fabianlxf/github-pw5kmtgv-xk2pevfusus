@@ -360,6 +360,7 @@ export default function FlameDashboard({
       state: getFlameState(c.lastActiveISO, graceHours, now),
       backgroundImage: backgroundImages[c.id as keyof typeof backgroundImages],
       intensity,
+      hoursToday,
       date: new Date().toISOString().slice(0, 10),
       reminderMinutes: 30 // Default 30 min reminder
     };
