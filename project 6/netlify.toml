@@ -22,3 +22,25 @@
   from = "/*"
   to = "/index.html"
   status = 200
+# netlify.toml
+
+[build]
+  command = "npm run build"
+  publish = "dist"
+  functions = "netlify/functions"
+
+# API-Redirects
+[[redirects]]
+  from = "/api/set-preferences"
+  to = "/.netlify/functions/set-preferences"
+  status = 200
+
+# SPA fallback
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+# Scheduled (UTC!): jede Stunde
+[functions."push-daily"]
+  schedule = "0 * * * *"
