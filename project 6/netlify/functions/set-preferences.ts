@@ -1,6 +1,6 @@
 // netlify/functions/set-preferences.ts
 import type { Handler } from '@netlify/functions';
-import { set as blobSet } from '@netlify/blobs';
+import { getStore } from '@netlify/blobs';
 
 type Prefs = {
   userId: string;
@@ -16,6 +16,8 @@ const json = (statusCode: number, body: any) => ({
   },
   body: JSON.stringify(body),
 });
+
+const store = getStore('prefs');
 
 export const handler: Handler = async (event) => {
   // Optional: CORS/Preflight erlauben, falls du es später cross-origin brauchst
@@ -56,9 +58,9 @@ export const handler: Handler = async (event) => {
       })
       .filter((x): x is string => !!x);
 
-    const key = `prefs/${encodeURIComponent(userId)}.json`;
+    const key = `${encodeURIComponent(userId)}.json`;
 
-    await blobSet(
+    await store.set(
       key,
       JSON.stringify({ wishText: String(wishText), times: normTimes, tz: String(tz) }),
       { contentType: 'application/json' }
