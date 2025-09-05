@@ -1,117 +1,102 @@
 // netlify/functions/push-daily.ts
 import type { Handler } from "@netlify/functions";
-import { getStore, list } from "@netlify/blobs";
 import webpush from "web-push";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
-type PrefFile = {
-  userId: string;
-  wishText: string;
-  times: string[];   // ["08:00","18:00"]
-  tz: string;        // "Europe/Berlin"
-};
+// Netlify setzt diese ENV in Site Settings → Environment variables
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || "";
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || "";
+const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || "";
 
-type PushSub = {
-  endpoint: string;
-  keys: { p256dh: string; auth: string };
-  userId: string;
-};
-
-const genAI = process.env.GOOGLE_API_KEY
-  ? new GoogleGenerativeAI(process.env.GOOGLE_API_KEY)
-  : null;
-
-webpush.setVapidDetails(
-  "mailto:you@example.com",
-  process.env.VAPID_PUBLIC_KEY || "",
-  process.env.VAPID_PRIVATE_KEY || ""
-);
-
-function nowInTZ(tz: string) {
-  const fmt = new Intl.DateTimeFormat("en-GB", {
-    timeZone: tz,
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
-  const parts = Object.fromEntries(
-    fmt.formatToParts(new Date()).map((p) => [p.type, p.value])
-  );
-  return `${parts.hour}:${parts.minute}`;
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails("mailto:you@example.com", VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
 }
 
-async function generateTip(wishText: string): Promise<string> {
-  if (!genAI) return "Täglicher Impuls.";
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+const genAI = GOOGLE_API_KEY ? new GoogleGenerativeAI(GOOGLE_API_KEY) : null;
+const model = genAI ? genAI.getGenerativeModel({ model: "gemini-1.5-flash" }) : null;
 
-  const prompt = `
-Erzeuge einen sehr kurzen, motivierenden Impuls (max. 2 Sätze, <= 220 Zeichen) zum Thema:
-"${wishText}".
+// kleine Helfer
+function fmtHM(d: Date, tz: string) {
+  return new Intl.DateTimeFormat("de-DE", {
+    hour: "2-digit", minute: "2-digit", hour12: false, timeZone: tz
+  }).format(d);
+}
 
-Format:
-- Kein Disclaimer, keine Emojis, keine Einleitung.
-- Direkt der Inhalt, knackig, alltagsnah.
-  `.trim();
+async function listKeys(prefix: string): Promise<string[]> {
+  // @ts-ignore
+  const { list } = await import("@netlify/blobs");
+  const entries = await list({ prefix });
+  return entries.blobs.map((b: any) => b.key);
+}
 
-  const r = await model.generateContent(prompt);
-  const text = (r.response.text() || "").trim();
-  return text || "Bleib dran – ein kleiner Schritt zählt.";
+async function getJSON<T=any>(key: string): Promise<T | null> {
+  // @ts-ignore
+  const { get } = await import("@netlify/blobs");
+  const txt = await get(key, { type: "text" });
+  if (!txt) return null;
+  try { return JSON.parse(txt as string); } catch { return null; }
+}
+
+async function sendPush(subscription: any, payload: any) {
+  try {
+    await webpush.sendNotification(subscription, JSON.stringify(payload));
+    return true;
+  } catch (e) {
+    console.error("[push] send error", e);
+    return false;
+  }
 }
 
 export const handler: Handler = async () => {
   try {
-    // 1) Alle Pref-Files holen
-    const prefsStore = getStore({ name: "prefs" });
-    const listed = await list({ prefix: "prefs/" }); // listet alle keys in diesem Namespace
-    const prefKeys = listed.blobs.map((b) => b.key);
+    if (!model) return { statusCode: 501, body: "GOOGLE_API_KEY not set" };
+    if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return { statusCode: 501, body: "VAPID keys missing" };
 
-    // 2) Jetztige Zeit je User-TZ prüfen + ggf. pushen
-    const subsStore = getStore({ name: "subs" }); // hier liegen Push-Subscriptions userweise
-    let pushed = 0;
+    // Alle gespeicherten Prefs laden
+    const prefKeys = await listKeys("prefs/");
+    const nowUTC = new Date();
+    let sent = 0;
 
     for (const key of prefKeys) {
-      const pref = (await prefsStore.getJSON(key)) as PrefFile | null;
-      if (!pref) continue;
+      // userId aus key ziehen
+      // Beispiel key: "prefs/demo-user.json"
+      const userId = key.replace(/^prefs\//, "").replace(/\.json$/, "");
 
-      const localNowHHMM = nowInTZ(pref.tz || "Europe/Berlin");
-      const shouldSend = (pref.times || ["08:00"]).some((t) => t === localNowHHMM);
-      if (!shouldSend) continue;
+      const prefs = await getJSON<{ wishText: string; times: string[]; tz: string }>(key);
+      if (!prefs || !prefs.times?.length || !prefs.tz) continue;
 
-      // Gemini-Text erzeugen
-      const body = await generateTip(pref.wishText || "Täglicher Fokus-Impuls");
+      // lokale Uhrzeit dieses Users bestimmen
+      const nowHM = fmtHM(nowUTC, prefs.tz); // "HH:MM"
+      // Wenn *eine* der gewünschten Zeiten == aktuelle lokale Stunde:Minute ist → senden
+      if (!prefs.times.includes(nowHM)) continue;
 
-      // Subscriptions des Users laden (einfaches Beispiel: eine JSON-Datei pro User)
-      const subKey = `subs/${pref.userId}.json`;
-      const subJson = (await subsStore.getJSON(subKey)) as { subs: PushSub[] } | null;
-      const subs = subJson?.subs || [];
-      if (!subs.length) continue;
+      // Abo laden
+      const sub = await getJSON<any>(`subs/${userId}.json`);
+      if (!sub) continue;
+
+      // Gemini: kurzen Tipp generieren
+      const prompt = `Erzeuge einen sehr kurzen, motivierenden Tagesimpuls basierend auf diesem Wunsch des Nutzers (max 250 Zeichen, sachlich, freundlich, DE):
+Wunsch: ${prefs.wishText}
+Formatiere als: Titel — ein kurzer Satz. Keine Emojis.`;
+
+      const resp = await model.generateContent({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
+      const full = resp.response.text().trim();
+      const [titleRaw, ...rest] = full.split("—");
+      const title = (titleRaw || "Tagesimpuls").trim();
+      const body = rest.join("—").trim() || "Kleiner Schritt – jetzt starten.";
 
       // Push senden
-      await Promise.all(
-        subs.map(async (s) => {
-          try {
-            await webpush.sendNotification(
-              { endpoint: s.endpoint, keys: s.keys } as any,
-              JSON.stringify({
-                title: "Dein täglicher Impuls",
-                body,
-                url: "/plan", // Zielseite in deiner App
-              })
-            );
-            pushed++;
-          } catch (e) {
-            console.warn("[push] failed for", s.endpoint, e);
-          }
-        })
-      );
+      const ok = await sendPush(sub, {
+        title,
+        body,
+        url: "/plan"
+      });
+      if (ok) sent++;
     }
 
-    return {
-      statusCode: 200,
-      body: JSON.stringify({ ok: true, pushed }),
-    };
+    return { statusCode: 200, body: JSON.stringify({ ok: true, sent }) };
   } catch (e: any) {
     console.error("[push-daily] error", e);
-    return { statusCode: 500, body: JSON.stringify({ error: e?.message || "failed" }) };
+    return { statusCode: 500, body: JSON.stringify({ error: "failed", detail: e?.message }) };
   }
 };
