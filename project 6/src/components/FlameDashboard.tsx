@@ -151,6 +151,93 @@ async function unsubscribePush() {
   return true;
 }
 
+// ---- Daily-Intent Erkennung & Preferences speichern ----
+type DailyPrefs = {
+  tips?: { enabled: boolean; categories: string[]; times: string[] };
+  scripture?: { enabled: boolean; time?: string; language?: string; audio?: boolean };
+};
+
+function parseTimeHints(text: string): string[] {
+  const t: string[] = [];
+  const m = text.match(/\bum\s*(\d{1,2})(?::(\d{2}))?\b/);
+  if (m) {
+    const hh = String(Math.min(23, parseInt(m[1], 10))).padStart(2, "0");
+    const mm = String(m[2] ? parseInt(m[2], 10) : 0).padStart(2, "0");
+    t.push(`${hh}:${mm}`);
+  }
+  if (/morgens|früh|frueh/.test(text)) t.push("08:00");
+  if (/mittags/.test(text)) t.push("12:00");
+  if (/nachmittags/.test(text)) t.push("15:00");
+  if (/abends/.test(text)) t.push("19:00");
+  return Array.from(new Set(t)).slice(0, 2);
+}
+
+function detectDailyPrefs(transcript: string): DailyPrefs | null {
+  const t = transcript.toLowerCase();
+
+  const wantsDaily =
+    /jeden tag|taeglich|täglich|daily|jeden morgen|jeden abend/.test(t) ||
+    /schick(e)? mir .* (tipps|vers|bibel|input)/.test(t);
+
+  if (!wantsDaily) return null;
+
+  const times = parseTimeHints(t);
+  const wantsFitness = /(fitness|gesundheit|sport|bewegung|workout|ernährung|ernaehrung)/.test(t);
+  const wantsScripture = /(bibel|bibelvers|schriftwort|psalm|verse|scripture)/.test(t);
+  const wantsMindset = /(mindset|achtsamkeit|meditation|reflexion)/.test(t);
+  const wantsWisdom = /(lernen|wissen|quote|zitat|weisheit)/.test(t);
+  const wantsFinance = /(finanz|geld|sparen|budget|invest)/.test(t);
+
+  const prefs: DailyPrefs = {};
+
+  if (wantsFitness || wantsMindset || wantsWisdom || wantsFinance || /tipps|input/.test(t)) {
+    const cats: string[] = [];
+    if (wantsFitness) cats.push("fitness");
+    if (wantsMindset) cats.push("mindset");
+    if (wantsWisdom) cats.push("wisdom");
+    if (wantsFinance) cats.push("finanzen");
+    if (cats.length === 0) cats.push("fitness");
+    prefs.tips = { enabled: true, categories: cats, times: times.length ? times : ["08:00", "18:00"] };
+  }
+
+  if (wantsScripture) {
+    prefs.scripture = {
+      enabled: true,
+      time: times[0] || "08:00",
+      language: /englisch|english|esv/.test(t) ? "ESV" : "LUT",
+      audio: /an(?:h|)ören|vorlesen|audio|hoeren/.test(t),
+    };
+  }
+
+  return Object.keys(prefs).length ? prefs : null;
+}
+
+async function maybeHandleDailyPreferences(transcript: string): Promise<boolean> {
+  const prefs = detectDailyPrefs(transcript);
+  if (!prefs) return false;
+
+  let sub = await getExistingSubscription();
+  if (!sub) sub = await subscribeForPush();
+  if (!sub) {
+    alert("Benachrichtigungen sind deaktiviert – bitte oben 🔔 aktivieren.");
+    return true;
+  }
+
+  const res = await callApi("/api/set-preferences", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ endpoint: sub.endpoint, prefs }),
+  });
+
+  if (res.ok) {
+    alert("Daily Inputs gespeichert ✅ – du bekommst künftig tägliche Tipps/Verse als Push.");
+  } else {
+    console.warn("set-preferences failed:", await res.text().catch(() => ""));
+    alert("Konnte Preferences nicht speichern.");
+  }
+  return true;
+}
+
 
 // Explizites Mapping von SPA-Pfaden ("/api/*") zu Netlify Functions ("/.netlify/functions/*")
 const FN_MAP: Record<string, string> = {
@@ -533,6 +620,13 @@ async function startPlanningWithSpeech() {
         const transcript: string = String(sttJson?.text || "").trim();
         if (!transcript) {
           await fallbackToTextPlan();
+          return;
+        }
+
+        // ➜ Daily-Intent zuerst abfangen (Präferenzen + Push), kein Plan-Event erzeugen
+        const handled = await maybeHandleDailyPreferences(transcript);
+        if (handled) {
+          // handled = es wurden Präferenzen gesetzt; nichts weiter tun
           return;
         }
 
