@@ -1,36 +1,39 @@
+# netlify.toml
+
 [build]
-  base = "project 6"   # wichtig, sonst sucht Netlify im Root
+  # <- GANZ WICHTIG: dein Code liegt in "project 6"
+  base = "project 6"
   command = "npm run build"
   publish = "dist"
   functions = "netlify/functions"
 
-# API-Redirects
+# ---- API Redirects zu den Functions ----
 [[redirects]]
   from = "/api/stt"
-  to = "/.netlify/functions/stt"
+  to   = "/.netlify/functions/stt"
   status = 200
 
 [[redirects]]
   from = "/api/plan/day"
-  to = "/.netlify/functions/plan-day"
+  to   = "/.netlify/functions/plan-day"
   status = 200
 
 [[redirects]]
   from = "/api/plan/from-speech"
-  to = "/.netlify/functions/plan-from-speech"
+  to   = "/.netlify/functions/plan-from-speech"
   status = 200
 
 [[redirects]]
   from = "/api/set-preferences"
-  to = "/.netlify/functions/set-preferences"
+  to   = "/.netlify/functions/set-preferences"
   status = 200
 
-# SPA fallback
+# ---- SPA Fallback ----
 [[redirects]]
   from = "/*"
-  to = "/index.html"
+  to   = "/index.html"
   status = 200
 
-# Scheduled (UTC!): jede Stunde
+# ---- Geplante Function (UTC): stündlich ----
 [functions."push-daily"]
   schedule = "0 * * * *"
