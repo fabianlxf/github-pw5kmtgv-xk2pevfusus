@@ -58,21 +58,35 @@ const genId = () => `plan-${Date.now()}-${Math.random().toString(36).slice(2, 9)
 // falls du später eine andere API-Base willst, einfach hier anpassen:
 const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
 const api = (path: string) => `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
+console.log('[FlameDashboard] API_BASE =', API_BASE || '(empty)');
 
 // Intelligenter API-Caller: versucht zuerst /api/* (Redirect), fällt bei 404/HTML auf /.netlify/functions/* zurück
 async function callApi(inputPath: string, init?: RequestInit): Promise<Response> {
   const primary = `${API_BASE}${inputPath}`;
+  // Ensure we always send an Accept header, but don't override user-supplied headers
+  const headers = new Headers(init?.headers || {});
+  if (!headers.has('accept')) headers.set('accept', 'application/json, */*');
+
   let res: Response | undefined;
   try {
-    res = await fetch(primary, init);
-  } catch {
+    res = await fetch(primary, { ...init, headers });
+  } catch (e) {
     res = undefined;
   }
-  const isHtml = res ? ((res.headers.get("content-type") || "").includes("text/html")) : false;
-  if (!res || res.status === 404 || isHtml) {
-    const fnPath = inputPath.replace(/^\/api\//, "/.netlify/functions/");
+
+  const contentType = res?.headers?.get('content-type') || '';
+  const looksHtml = contentType.includes('text/html');
+
+  // If primary is missing (404) or returns HTML (SPA fallback), try Netlify Functions path
+  if (!res || res.status === 404 || looksHtml) {
+    const fnPath = inputPath.replace(/^\/api\//, '/.netlify/functions/');
     const fallback = `${API_BASE}${fnPath}`;
-    res = await fetch(fallback, init);
+    try {
+      res = await fetch(fallback, { ...init, headers });
+    } catch (e) {
+      // surface network errors
+      throw e;
+    }
   }
   return res!;
 }
@@ -344,6 +358,8 @@ async function startPlanningWithSpeech() {
           throw new Error("STT Netzfehler");
         });
         window.clearTimeout(sttTO);
+        console.log('[stt] status:', sttRes?.status, sttRes?.headers?.get('content-type'));
+        if (sttRes && sttRes.status === 404) console.warn('[stt] 404 from primary path, fallback should have been tried.');
 
         // Fallback: manuelle Texteingabe, falls STT scheitert
         const fallbackToTextPlan = async () => {
@@ -358,6 +374,7 @@ async function startPlanningWithSpeech() {
           if (!planRes.ok) throw new Error(await planRes.text().catch(() => "plan/day failed"));
 
           const planJson = await planRes.json().catch(() => ({} as any));
+          console.log('[plan] payload:', planJson);
           const raw = Array.isArray(planJson?.events) ? planJson.events : [];
           const events: PlanEvent[] = raw.map((ev: any) => {
             const title = String(ev?.title || "Aufgabe");
@@ -386,21 +403,26 @@ async function startPlanningWithSpeech() {
         }
 
         const sttJson = await sttRes.json().catch(() => ({} as any));
+        console.log('[stt] payload:', sttJson);
         const transcript: string = String(sttJson?.text || "").trim();
         if (!transcript) {
           await fallbackToTextPlan();
           return;
         }
 
+        console.log('[plan] calling /api/plan/day with transcript length:', transcript.length);
         // 2) Transkript → /api/plan/day (Gemini)
         const planRes = await callApi("/api/plan/day", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ description: transcript }),
         });
+        console.log('[plan] status:', planRes?.status, planRes?.headers?.get('content-type'));
+        if (planRes && planRes.status === 404) console.warn('[plan] 404 from primary path, fallback should have been tried.');
         if (!planRes.ok) throw new Error(await planRes.text().catch(() => "plan/day failed"));
 
         const planJson = await planRes.json().catch(() => ({} as any));
+        console.log('[plan] payload:', planJson);
         const raw = Array.isArray(planJson?.events) ? planJson.events : [];
         const events: PlanEvent[] = raw.map((ev: any) => {
           const title = String(ev?.title || "Aufgabe");
