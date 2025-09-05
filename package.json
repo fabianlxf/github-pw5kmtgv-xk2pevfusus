@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "lambda-multipart-parser": "^1.0.1",
+    "openai": "^5.19.1"
+  }
+}
