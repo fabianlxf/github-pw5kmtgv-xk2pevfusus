@@ -532,6 +532,41 @@ export default function FlameDashboard({
     return "wisdom";
   };
 
+  // Normalize possible server categories to our 4 ids
+  function normalizeCategory(cat?: string): string {
+    const c = (cat || "").toLowerCase();
+    if (["fitness", "health", "workout", "sport"].some(k => c.includes(k))) return "fitness";
+    if (["mindset", "meditation", "achtsam", "journal"].some(k => c.includes(k))) return "mindset";
+    if (["wisdom", "learn", "lernen", "study", "reading", "admin", "orga", "communication", "email", "meeting"].some(k => c.includes(k))) return "wisdom";
+    if (["finanz", "finance", "budget", "geld", "konto", "steuer"].some(k => c.includes(k))) return "finanzen";
+    return ""; // unknown
+  }
+
+  // Ask backend to categorize titles; only refines if backend returns a valid mapping
+  async function refineEventCategories(events: PlanEvent[]): Promise<PlanEvent[]> {
+    const refined: PlanEvent[] = [];
+    for (const ev of events) {
+      let category = ev.category;
+      try {
+        // Only ask backend if the category looks uncertain
+        if (!category || category === "wisdom" || category === "fitness" || category === "mindset" || category === "finanzen") {
+          const r = await callApi("/api/categorize", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title: ev.title }),
+          });
+          if (r.ok) {
+            const j = await r.json().catch(() => ({} as any));
+            const fromServer = normalizeCategory(j?.category);
+            if (fromServer) category = fromServer;
+          }
+        }
+      } catch {}
+      refined.push({ ...ev, category });
+    }
+    return refined;
+  }
+
   // ===== Recording → Upload Speech → fallback zu Text-Planer (Gemini) =====
 // ===== Recording → Whisper (/api/stt) → Gemini (/api/plan/day) =====
 async function startPlanningWithSpeech() {
@@ -606,7 +641,8 @@ async function startPlanningWithSpeech() {
               reminderMinutes: 30,
             };
           });
-          if (onPlanGenerated && events.length) onPlanGenerated(events);
+          const refined = await refineEventCategories(events);
+          if (onPlanGenerated && refined.length) onPlanGenerated(refined);
         };
 
         if (!sttRes.ok) {
@@ -644,13 +680,14 @@ async function startPlanningWithSpeech() {
         const planJson = await planRes.json().catch(() => ({} as any));
         console.log('[plan] payload:', planJson);
         const raw = Array.isArray(planJson?.events) ? planJson.events : [];
-        const events: PlanEvent[] = raw.map((ev: any) => {
+        let events: PlanEvent[] = raw.map((ev: any) => {
           const title = String(ev?.title || "Aufgabe");
           const time = ev?.start
             ? new Date(ev.start).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })
             : "09:00";
-          // Server-Kategorie nutzen, sonst lokales Mapping
-          const category = String(ev?.category || mapTaskToCategory(title));
+          // Server-Kategorie nutzen (normalisiert), sonst lokales Mapping
+          const serverCat = normalizeCategory(String(ev?.category || ""));
+          const category = serverCat || mapTaskToCategory(title);
           return {
             id: genId(),
             title,
@@ -662,6 +699,7 @@ async function startPlanningWithSpeech() {
             reminderMinutes: 30,
           };
         });
+        events = await refineEventCategories(events);
         if (onPlanGenerated && events.length) onPlanGenerated(events);
       } catch (err) {
         console.error("Plan generation error:", err);
