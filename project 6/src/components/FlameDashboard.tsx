@@ -59,6 +59,24 @@ const genId = () => `plan-${Date.now()}-${Math.random().toString(36).slice(2, 9)
 const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
 const api = (path: string) => `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
 
+// Intelligenter API-Caller: versucht zuerst /api/* (Redirect), fällt bei 404/HTML auf /.netlify/functions/* zurück
+async function callApi(inputPath: string, init?: RequestInit): Promise<Response> {
+  const primary = `${API_BASE}${inputPath}`;
+  let res: Response | undefined;
+  try {
+    res = await fetch(primary, init);
+  } catch {
+    res = undefined;
+  }
+  const isHtml = res ? ((res.headers.get("content-type") || "").includes("text/html")) : false;
+  if (!res || res.status === 404 || isHtml) {
+    const fnPath = inputPath.replace(/^\/api\//, "/.netlify/functions/");
+    const fallback = `${API_BASE}${fnPath}`;
+    res = await fetch(fallback, init);
+  }
+  return res!;
+}
+
 function pickSupportedMime(): string {
   const MR: any = (window as any).MediaRecorder;
   const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
@@ -317,7 +335,8 @@ async function startPlanningWithSpeech() {
         const sttCtrl = new AbortController();
         const sttTO = window.setTimeout(() => sttCtrl.abort(), 35_000);
 
-        const sttRes = await fetch(api("/api/stt"), {
+        console.log("[stt] sending FormData:", { type: blob.type, size: blob.size, filename });
+        const sttRes = await callApi("/api/stt", {
           method: "POST",
           body: fd,
           signal: sttCtrl.signal,
@@ -331,7 +350,7 @@ async function startPlanningWithSpeech() {
           const desc = window.prompt("Konnte Sprache nicht erkennen. Bitte beschreibe kurz deinen Tag:");
           if (!desc || !desc.trim()) return;
 
-          const planRes = await fetch(api("/api/plan/day"), {
+          const planRes = await callApi("/api/plan/day", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ description: desc }),
@@ -374,7 +393,7 @@ async function startPlanningWithSpeech() {
         }
 
         // 2) Transkript → /api/plan/day (Gemini)
-        const planRes = await fetch(api("/api/plan/day"), {
+        const planRes = await callApi("/api/plan/day", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ description: transcript }),
@@ -456,7 +475,8 @@ async function startPlanningWithSpeech() {
         const fd = new FormData();
         fd.append("file", blob, filename);
 
-        const sttRes = await fetch(api("/api/stt"), { method: "POST", body: fd });
+        console.log("[stt] sending FormData:", { type: blob.type, size: blob.size, filename });
+        const sttRes = await callApi("/api/stt", { method: "POST", body: fd });
         if (!sttRes.ok) throw new Error("STT fehlgeschlagen");
         const sttJson = await sttRes.json();
         const transcript: string = String(sttJson?.text || "").trim();
@@ -499,7 +519,7 @@ function stopRecording() {
 }
 
 async function requestPlan(text: string) {
-  const res = await fetch(api("/api/plan/day"), {
+  const res = await callApi("/api/plan/day", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ description: text }),
