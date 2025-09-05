@@ -1,0 +1,28 @@
+// netlify/functions/save-subscription.ts
+import type { Handler } from "@netlify/functions";
+
+type Body = { userId: string; subscription: any };
+
+export const handler: Handler = async (event) => {
+  try {
+    if (event.httpMethod !== "POST") {
+      return { statusCode: 405, body: "Method Not Allowed" };
+    }
+    const body = JSON.parse(event.body || "{}") as Body;
+    if (!body.userId || !body.subscription) {
+      return { statusCode: 400, body: JSON.stringify({ error: "userId + subscription required" }) };
+    }
+
+    // Netlify Blobs API (KV) – speichert Abo unter subs/<userId>.json
+    // @ts-ignore
+    const store = await import("@netlify/blobs");
+    await store.set(`subs/${body.userId}.json`, JSON.stringify(body.subscription), {
+      contentType: "application/json",
+    });
+
+    return { statusCode: 200, body: JSON.stringify({ ok: true }) };
+  } catch (e: any) {
+    console.error("[save-subscription] error", e);
+    return { statusCode: 500, body: JSON.stringify({ error: "failed to save subscription" }) };
+  }
+};
