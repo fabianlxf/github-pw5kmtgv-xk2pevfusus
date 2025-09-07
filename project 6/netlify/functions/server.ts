@@ -67,6 +67,105 @@ app.post('/api/stt', upload.single('file'), async (req, res) => {
   }
 });
 
+// --- Speech → Plan (bridges client /api/plan/from-speech to STT + Plan)
+app.post('/api/plan/from-speech', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file?.buffer) return res.status(400).json({ error: 'no audio file (field name must be "file")' });
+    // 1) Transcribe
+    let text = '';
+    const mime = req.file.mimetype || 'audio/webm';
+    const name = req.file.originalname || 'audio.webm';
+    if (OPENAI_API_KEY) {
+      try { text = await transcribeWhisper(req.file.buffer, name, mime); } catch (e) { console.warn('[from-speech] whisper failed', e); }
+    }
+    if (!text && GOOGLE_API_KEY) {
+      try { text = await transcribeGemini(req.file.buffer, mime); } catch (e) { console.warn('[from-speech] gemini stt failed', e); }
+    }
+    if (!text) return res.status(501).json({ error: 'no STT provider configured' });
+
+    // 2) Plan from text (Gemini)
+    if (!GOOGLE_API_KEY) return res.status(501).json({ error: 'Gemini not configured' });
+    const plan = await generatePlan(text);
+    const rawTasks = Array.isArray(plan.tasks) ? plan.tasks : [];
+
+    // Normalize and try re-categorization for unknowns
+    const prelim = rawTasks.map((t: any) => ({
+      title: t?.title || 'Task',
+      start: t?.start,
+      end: t?.end,
+      category: normalizeCategory(t?.category),
+      location: t?.location,
+    }));
+    const tasks = await Promise.all(
+      prelim.map(async (e) => {
+        if (e.category !== 'other' || !GOOGLE_API_KEY) return e;
+        const aiCat = await categorizeTaskTitleGemini(e.title);
+        return { ...e, category: aiCat || 'other' };
+      })
+    );
+
+    return res.json({ text, plan: { date: plan.date, timezone: plan.timezone, tasks } });
+  } catch (e) {
+    console.error('[/api/plan/from-speech] error', e);
+    return res.status(500).json({ error: 'from-speech failed' });
+  }
+});
+
+// ===== Daily Input (lightweight, serverless-friendly) =====
+// In-memory preferences by push endpoint (or any user key)
+ type DailyPrefs = { topic?: string; category?: 'fitness'|'mindset'|'wisdom'|'finanzen'|'other'; style?: 'short'|'medium'|'long'; hour?: number; minute?: number; tz?: string };
+ const dailyPrefs = new Map<string, DailyPrefs>();
+
+async function generateDailyInput(prefs: DailyPrefs): Promise<string> {
+  if (!genAI) throw new Error('Gemini not configured');
+  const model = genAI.getGenerativeModel({ model: GEMINI_MODEL, generationConfig: { temperature: 0.6, maxOutputTokens: 500 } });
+  const topic = prefs.topic?.trim() || 'kurzer nützlicher Tagesimpuls';
+  const cat = prefs.category || 'wisdom';
+  const style = prefs.style || 'short';
+  const lengthHint = style === 'long' ? '8–10 Sätze' : style === 'medium' ? '4–6 Sätze' : '2–3 Sätze';
+  const prompt = `Schreibe ${lengthHint} als täglichen Input zum Thema "${topic}". Tone: ermutigend, konkret, kein Fluff. Wenn passend, gib 1 Mini-Aufgabe (<=1 Satz). Kategorie-Kontext: ${cat}. Ausgabe nur als reiner Text.`;
+  const r = await model.generateContent({ contents: [{ role: 'user', parts: [{ text: prompt }]}] });
+  return (r.response.text() || '').trim();
+}
+
+// Save simple daily input preferences (keyed by push endpoint or client-provided id)
+app.post('/api/set-preferences', async (req, res) => {
+  try {
+    const { endpoint = '', prefs = {} } = req.body || {};
+    if (!endpoint) return res.status(400).json({ error: 'endpoint required' });
+    const clean: DailyPrefs = {
+      topic: String(prefs.topic ?? '').slice(0, 200),
+      category: ['fitness','mindset','wisdom','finanzen','other'].includes(String(prefs.category)) ? prefs.category : 'wisdom',
+      style: ['short','medium','long'].includes(String(prefs.style)) ? prefs.style : 'short',
+      hour: Number.isFinite(prefs.hour) ? Number(prefs.hour) : undefined,
+      minute: Number.isFinite(prefs.minute) ? Number(prefs.minute) : undefined,
+      tz: prefs.tz ? String(prefs.tz) : undefined,
+    } as DailyPrefs;
+    dailyPrefs.set(endpoint, clean);
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('[/api/set-preferences] error', e);
+    return res.status(500).json({ error: 'set-preferences failed' });
+  }
+});
+
+// One-off: generate a sample input now (no scheduling/push)
+app.post('/api/generate-input', async (req, res) => {
+  try {
+    if (!GOOGLE_API_KEY) return res.status(501).json({ error: 'Gemini not configured' });
+    const prefs: DailyPrefs = {
+      topic: String(req.body?.topic ?? ''),
+      category: req.body?.category,
+      style: req.body?.style,
+    } as DailyPrefs;
+    const text = await generateDailyInput(prefs);
+    return res.json({ text });
+  } catch (e) {
+    console.error('[/api/generate-input] error', e);
+    return res.status(500).json({ error: 'generate-input failed' });
+  }
+});
+
 // --- Planner (Text → Tagesplan)
 type PlannedTask = { title: string; start: string; end: string; category?: string; location?: string };
 
