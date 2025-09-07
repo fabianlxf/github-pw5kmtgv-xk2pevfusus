@@ -755,6 +755,36 @@ function stopRecording() {
     setShowMiniTasks(false);
   };
 
+  // One-off: generate an immediate input from the backend (Gemini)
+  async function handleOneOffInput() {
+    try {
+      const topic = (window.prompt("Worüber möchtest du jetzt einen kurzen Input? (z.B. Achtsamkeit, Finanzen, Bibelvers, Fokus-Tipp)") || "").trim();
+      if (!topic) return;
+
+      // Optional: user can hint a category to style the notification later; defaults handled server-side
+      const categoryHint = (window.prompt("(Optional) Kategorie-Hinweis: fitness / mindset / wisdom / finanzen", "") || "").trim();
+
+      const res = await callApi("/api/generate-input", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ topic, category: categoryHint || undefined })
+      });
+
+      if (!res.ok) {
+        const msg = await res.text().catch(() => "Fehler beim Generieren des Inputs.");
+        alert(msg || "Fehler beim Generieren des Inputs.");
+        return;
+      }
+
+      const j = await res.json().catch(() => ({} as any));
+      const text: string = String(j?.text || j?.message || "(kein Text)");
+      alert(text);
+    } catch (e) {
+      console.error("one-off input error", e);
+      alert("Konnte den Input gerade nicht erstellen.");
+    }
+  }
+
   const getIconComponent = (iconName: string, className: string = "w-6 h-6") => {
     switch (iconName) {
       case "Dumbbell":
@@ -1134,6 +1164,23 @@ function stopRecording() {
               <div className="flex items-center justify-center gap-2">
                 <Plus className="w-5 h-5" />
                 <span className="font-medium">Manuell hinzufügen</span>
+              </div>
+            </button>
+
+            <button
+              onClick={handleOneOffInput}
+              disabled={planningBusy}
+              className={`w-full p-4 rounded-xl transition-all duration-300 ${
+                planningBusy
+                  ? (isDarkMode ? "bg-white/5 text-white/40" : "bg-gray-100 text-gray-400")
+                  : (isDarkMode
+                      ? "bg-indigo-600/20 hover:bg-indigo-600/30 text-white/80 border border-white/20"
+                      : "bg-indigo-100 hover:bg-indigo-200 text-gray-800 border border-gray-300")
+              } disabled:cursor-not-allowed`}
+            >
+              <div className="flex items-center justify-center gap-2">
+                <Sparkles className="w-5 h-5" />
+                <span className="font-medium">Jetzt Input</span>
               </div>
             </button>
 
