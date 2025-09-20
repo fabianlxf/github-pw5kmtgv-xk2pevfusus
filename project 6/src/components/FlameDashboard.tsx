@@ -14,6 +14,7 @@ import {
   ThumbsUp,
   ThumbsDown,
   Calendar,
+  Camera,
 } from "lucide-react";
 
 export type Category = {
@@ -37,6 +38,31 @@ export type PlanEvent = {
   date?: string;
   reminderMinutes?: number; // 15, 30, 60, 120 minutes before
 };
+
+// ==== Selfie → Pixel Avatar Helpers ====
+function stopMediaStream(stream: MediaStream | null) {
+  try { stream?.getTracks().forEach(t => t.stop()); } catch {}
+}
+
+function makePixelAvatar(src: HTMLImageElement, outSize = 128, pixelSize = 32): string {
+  const small = document.createElement('canvas');
+  small.width = pixelSize; small.height = pixelSize;
+  const sctx = small.getContext('2d')!;
+  const vw = (src as any).videoWidth || (src as any).naturalWidth;
+  const vh = (src as any).videoHeight || (src as any).naturalHeight;
+  const minSide = Math.min(vw, vh);
+  const sx = (vw - minSide) / 2;
+  const sy = (vh - minSide) / 2;
+  sctx.imageSmoothingEnabled = false;
+  sctx.drawImage(src as any, sx, sy, minSide, minSide, 0, 0, pixelSize, pixelSize);
+
+  const big = document.createElement('canvas');
+  big.width = outSize; big.height = outSize;
+  const bctx = big.getContext('2d')!;
+  bctx.imageSmoothingEnabled = false;
+  bctx.drawImage(small, 0, 0, pixelSize, pixelSize, 0, 0, outSize, outSize);
+  return big.toDataURL('image/png');
+}
 
 export function getFlameState(
   lastActiveISO?: string,
@@ -307,6 +333,11 @@ export default function FlameDashboard({
   const [recording, setRecording] = useState(false);
   const [planningBusy, setPlanningBusy] = useState(false);
   const [aiSuggestions, setAiSuggestions] = useState<{ category: string; tasks: string[] }[]>([]);
+  // Selfie / Pixel Avatar state
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
+  const [showSelfieCapture, setShowSelfieCapture] = useState(false);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [videoStream, setVideoStream] = useState<MediaStream | null>(null);
   const [showMiniTasks, setShowMiniTasks] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunks = useRef<Blob[]>([]);
@@ -343,12 +374,46 @@ export default function FlameDashboard({
     setCheckingPush(false);
   }
 
-  const backgroundImages: Record<string, string> = {
-    fitness: "/posters/fitness.png",
-    finanzen: "/posters/persoenlichkeit.png",
-    mindset: "/posters/mindset.png",
-    wisdom: "/posters/wisdom.jpeg",
-  };
+  // ===== Selfie Capture Flow =====
+  async function startSelfieCapture() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
+      setVideoStream(stream);
+      setShowSelfieCapture(true);
+      setTimeout(() => { if (videoRef.current) (videoRef.current as any).srcObject = stream; }, 0);
+    } catch (e) {
+      console.warn('Selfie capture blocked/unavailable', e);
+    }
+  }
+  function cancelSelfie() {
+    stopMediaStream(videoStream);
+    setVideoStream(null);
+    setShowSelfieCapture(false);
+  }
+  function takeSelfie() {
+    if (!videoRef.current) return;
+    const dataUrl = makePixelAvatar(videoRef.current as any as HTMLImageElement, 160, 36);
+    setAvatarUrl(dataUrl);
+    try { localStorage.setItem('flame.pixel.avatar', dataUrl); localStorage.setItem('flame.avatar.captured', '1'); } catch {}
+    cancelSelfie();
+  }
+  React.useEffect(() => {
+    try {
+      const saved = localStorage.getItem('flame.pixel.avatar');
+      if (saved) setAvatarUrl(saved);
+      else if (!localStorage.getItem('flame.avatar.asked')) {
+        localStorage.setItem('flame.avatar.asked', '1');
+        setTimeout(() => {
+          if (window.confirm('Möchtest du ein kurzes Selfie aufnehmen, um deinen Pixel-Char zu erstellen?')) {
+            startSelfieCapture();
+          }
+        }, 600);
+      }
+    } catch {}
+  }, []);
+
+  // Background images removed – cards use icons only now
+  const backgroundImages: Record<string, string> = {};
 
   const getFlameIntensity = (categoryId: string, hoursToday: number): number => {
     switch (categoryId) {
@@ -482,6 +547,16 @@ export default function FlameDashboard({
 
   const getCategoryByName = (name: string) => {
     return categories.find((c) => c.name.toLowerCase() === name.toLowerCase()) || categories[0];
+  };
+
+  const getDisplayName = (id: string) => {
+    switch (id) {
+      case 'wisdom': return 'Tasks';
+      case 'fitness': return 'Habits';
+      case 'mindset': return 'Journal';
+      case 'finanzen': return 'Expenses';
+      default: return id;
+    }
   };
 
   // === Verbesserte Kategorie-Zuordnung ===
@@ -812,6 +887,8 @@ function stopRecording() {
   };
 
   const liveTask = getLiveTask();
+  const currentCat = liveTask?.category || (states.find(s => (s as any).hoursToday > 0)?.id) || 'wisdom';
+  const avatarAnimClass = currentCat === 'wisdom' ? 'animate-bounce' : currentCat === 'fitness' ? 'animate-pulse' : currentCat === 'mindset' ? 'animate-[wiggle_1.2s_ease-in-out_infinite]' : 'animate-[shake_1.1s_ease-in-out_infinite]';
 
   // ====== UI ======
   return (
@@ -820,42 +897,46 @@ function stopRecording() {
         isDarkMode ? "bg-gradient-to-br from-gray-900 via-black to-gray-900" : "bg-gradient-to-br from-gray-50 via-white to-gray-100"
       }`}
     >
+      {showSelfieCapture && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-6">
+          <div className={`w-full max-w-sm rounded-2xl overflow-hidden border ${isDarkMode ? 'bg-gray-900 border-white/10' : 'bg-white border-gray-200'}`}>
+            <div className="p-3 text-center font-medium">Pixel-Selfie</div>
+            <div className="p-3 flex items-center justify-center">
+              <video ref={videoRef} autoPlay playsInline className="w-64 h-64 object-cover rounded-xl bg-black" />
+            </div>
+            <div className="p-3 flex gap-2 justify-center">
+              <button onClick={takeSelfie} className="px-4 py-2 rounded-xl bg-green-600 text-white">Foto aufnehmen</button>
+              <button onClick={cancelSelfie} className={`px-4 py-2 rounded-xl ${isDarkMode ? 'bg-white/10 text-white' : 'bg-gray-100 text-gray-800'}`}>Abbrechen</button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* Header */}
       <div className="flex justify-between items-center p-6 pt-12">
         <div className="flex items-center space-x-4">
           <div className="relative">
             <div
-              className={`w-20 h-20 rounded-full ${
-                isDarkMode ? "bg-gradient-to-br from-orange-500/20 to-red-600/20 border-2 border-orange-400/40" : "bg-gradient-to-br from-orange-200/60 to-red-300/60 border-2 border-orange-400/60"
-              } flex items-center justify-center backdrop-blur-md shadow-2xl ${getFlameAnimation(masterPercent)}`}
+              className={`w-24 h-24 rounded-2xl flex items-center justify-center backdrop-blur-md shadow-2xl border-2 ${
+                isDarkMode ? 'bg-white/5 border-white/20' : 'bg-black/5 border-black/10'
+              }`}
             >
-              <span
-                className={`${getFlameSize(masterPercent)} filter drop-shadow-lg`}
-                style={{
-                  animation:
-                    masterPercent >= 80
-                      ? "flameIntense 0.8s ease-in-out infinite alternate"
-                      : masterPercent >= 60
-                      ? "flameMedium 1.2s ease-in-out infinite alternate"
-                      : masterPercent >= 40
-                      ? "flameGentle 1.8s ease-in-out infinite alternate"
-                      : "none",
-                }}
-              >
-                <Flame className="w-8 h-8 text-orange-400" />
-              </span>
+              {avatarUrl ? (
+                <img src={avatarUrl} alt="Pixel Avatar" className={`w-20 h-20 ${avatarAnimClass}`} />
+              ) : (
+                <div className="flex flex-col items-center text-sm opacity-80">
+                  <Camera className="w-6 h-6 mb-1" />
+                  <button onClick={startSelfieCapture} className={`px-2 py-1 rounded-md text-xs ${isDarkMode ? 'bg-white/10 hover:bg-white/20' : 'bg-black/10 hover:bg-black/20'}`}>Selfie</button>
+                </div>
+              )}
             </div>
-            {masterPercent >= 60 && (
-              <div className="absolute inset-0 rounded-full bg-orange-400/30 blur-2xl -z-10" style={{ animation: "glow 2s ease-in-out infinite alternate" }} />
-            )}
           </div>
-
           <div>
             <div
               className={`text-3xl font-bold bg-gradient-to-r ${isDarkMode ? "from-orange-300 to-red-300" : "from-orange-600 to-red-600"} bg-clip-text text-transparent`}
             >
               {masterPercent}%
             </div>
+            <button onClick={startSelfieCapture} className={`mt-1 text-xs underline ${isDarkMode ? 'text-orange-200/80' : 'text-orange-700/80'}`}>Avatar ändern</button>
             <div className={`text-sm font-medium ${isDarkMode ? "text-orange-200/90" : "text-orange-700"}`}>on fire</div>
           </div>
         </div>
@@ -1201,7 +1282,7 @@ function stopRecording() {
 
       {/* Kategorien */}
       <div className="px-6 pb-32">
-        <h2 className={`text-2xl font-bold mb-4 ${isDarkMode ? "text-white" : "text-gray-900"}`}>Kategorien</h2>
+        <h2 className={`text-2xl font-bold mb-4 ${isDarkMode ? "text-white" : "text-gray-900"}`}>Bereiche</h2>
 
         <div className="grid grid-cols-2 gap-4">
           {states.slice(0, 4).map((c) => {
@@ -1213,38 +1294,10 @@ function stopRecording() {
             return (
               <div
                 key={c.id}
-                className="relative overflow-hidden rounded-3xl h-36 group cursor-pointer transform transition-all duration-500 hover:scale-[1.08] hover:shadow-2xl hover:-translate-y-3 perspective-1000"
+                className="relative overflow-hidden rounded-3xl h-36 group cursor-pointer transform transition-all duration-500 hover:scale-[1.05] hover:shadow-2xl"
                 onClick={() => onCategoryClick?.(c.id)}
-                style={{
-                  backgroundImage: backgroundImages[c.id as keyof typeof backgroundImages]
-                    ? `url("${encodeURI(backgroundImages[c.id as keyof typeof backgroundImages])}")`
-                    : undefined,
-                  backgroundSize: "cover",
-                  backgroundPosition: c.id === "wisdom" || c.id === "mindset" ? "50% 80%" : "center",
-                  transform: "rotateX(5deg) rotateY(-5deg)",
-                  boxShadow:
-                    "0 25px 50px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.15), inset 0 1px 0 rgba(255,255,255,0.1)",
-                }}
               >
-                <div
-                  className={`absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent ${
-                    isActive
-                      ? isDarkMode
-                        ? "bg-gradient-to-r from-orange-600/30 to-red-600/30"
-                        : "bg-gradient-to-r from-orange-400/40 to-red-500/40"
-                      : isGrace
-                      ? isDarkMode
-                        ? "bg-gradient-to-r from-amber-600/30 to-orange-600/30"
-                        : "bg-gradient-to-r from-amber-400/40 to-orange-500/40"
-                      : isWarm
-                      ? isDarkMode
-                        ? "bg-gradient-to-r from-blue-600/30 to-indigo-600/30"
-                        : "bg-gradient-to-r from-blue-400/40 to-indigo-500/40"
-                      : isDarkMode
-                      ? "bg-gradient-to-r from-gray-900/50 to-gray-800/50"
-                      : "bg-gradient-to-r from-gray-600/40 to-gray-700/40"
-                  }`}
-                />
+                <div className={`absolute inset-0 ${isDarkMode ? 'bg-white/5' : 'bg-black/5'}`} />
                 {(isActive || isGrace || isWarm) && (
                   <div
                     className={`absolute inset-0 rounded-3xl border-2 ${
@@ -1319,19 +1372,13 @@ function stopRecording() {
                     </div>
 
                     <div>
-                      <div className="font-bold text-lg text-white drop-shadow-lg mb-1">{c.name}</div>
+                      <div className="font-bold text-lg text-white drop-shadow-lg mb-1">{getDisplayName(c.id)}</div>
                       <div
                         className={`text-xs font-medium drop-shadow ${
                           isActive ? "text-orange-200" : isGrace ? "text-amber-200" : isWarm ? "text-blue-200" : "text-gray-200"
                         }`}
                       >
-                        {isActive
-                          ? `${(c as any).intensity}% (${(c as any).hoursToday.toFixed(1)}h) - Brennt!`
-                          : isGrace
-                          ? `${(c as any).intensity}% (${(c as any).hoursToday.toFixed(1)}h) - Warm`
-                          : isWarm
-                          ? `${(c as any).intensity}% (${(c as any).hoursToday.toFixed(1)}h) - Glimmt`
-                          : "Inaktiv"}
+                        {`${(c as any).hoursToday.toFixed(1)}h heute`}
                       </div>
                     </div>
                   </div>
@@ -1399,6 +1446,15 @@ function stopRecording() {
         }
         .border-3 {
           border-width: 3px;
+        }
+        @keyframes wiggle {
+          0%, 100% { transform: rotate(-2deg) translateY(0); }
+          50% { transform: rotate(2deg) translateY(-2px); }
+        }
+        @keyframes shake {
+          0%, 100% { transform: translateX(0); }
+          25% { transform: translateX(-2px); }
+          75% { transform: translateX(2px); }
         }
       `}</style>
     </div>
