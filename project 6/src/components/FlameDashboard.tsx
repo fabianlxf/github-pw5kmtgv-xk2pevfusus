@@ -45,7 +45,7 @@ function stopMediaStream(stream: MediaStream | null) {
 }
 
 function makePixelAvatar(src: HTMLImageElement, outSize = 128, spriteScale = 8): string {
-  // --- Read selfie (square center crop) for sampling and head rendering ---
+  // --- 1) Read square selfie to canvas for analysis ---
   const vw = (src as any).videoWidth || (src as any).naturalWidth;
   const vh = (src as any).videoHeight || (src as any).naturalHeight;
   const size = Math.min(vw, vh);
@@ -53,30 +53,76 @@ function makePixelAvatar(src: HTMLImageElement, outSize = 128, spriteScale = 8):
   const sy = (vh - size) / 2;
 
   const sample = document.createElement('canvas');
-  sample.width = 128; sample.height = 128; // higher-res head source
+  sample.width = 128; sample.height = 128;
   const sctx = sample.getContext('2d')!;
   sctx.imageSmoothingEnabled = true;
   sctx.drawImage(src as any, sx, sy, size, size, 0, 0, 128, 128);
 
-  // --- Color sampling for palette decisions (hair/skin/tie) ---
-  const avgArea = (x0: number, y0: number, w: number, h: number) => {
-    const d = sctx.getImageData(x0, y0, w, h).data; let r=0,g=0,b=0; const n=w*h;
-    for (let i=0;i<d.length;i+=4){ r+=d[i]; g+=d[i+1]; b+=d[i+2]; }
+  // --- 2) Skin detection (approx) in YCbCr to estimate head bbox ---
+  const img = sctx.getImageData(0, 0, 128, 128);
+  const W = 128, H = 128, data = img.data;
+  const isSkin = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      const r = data[i], g = data[i+1], b = data[i+2];
+      // Convert to YCbCr (BT.601)
+      const Y  =  0.299*r + 0.587*g + 0.114*b;
+      const Cb = 128 - 0.168736*r - 0.331264*g + 0.5*b;
+      const Cr = 128 + 0.5*r - 0.418688*g - 0.081312*b;
+      // Typical loose skin thresholds
+      const skin = (Cr > 133 && Cr < 173 && Cb > 77 && Cb < 127);
+      isSkin[y*W + x] = skin ? 1 : 0;
+    }
+  }
+  // Find a central head-like box by expanding from the center until skin ratio drops
+  let cx = W/2, cy = H*0.42; // face center heuristic slightly above actual center
+  let rad = 10;
+  const maxR = 48;
+  function skinRatio(r:number){
+    let count=0, total=0;
+    const x0 = Math.max(0, Math.floor(cx - r)), y0 = Math.max(0, Math.floor(cy - r));
+    const x1 = Math.min(W-1, Math.ceil(cx + r)), y1 = Math.min(H-1, Math.ceil(cy + r));
+    for(let y=y0;y<=y1;y++){
+      for(let x=x0;x<=x1;x++){
+        const dx=x-cx, dy=y-cy; if(dx*dx+dy*dy<=r*r){ total++; if(isSkin[y*W+x]) count++; }
+      }
+    }
+    return total?count/total:0;
+  }
+  while (rad < maxR && skinRatio(rad) > 0.35) rad += 2; // stop when leaving face area
+  const headR = Math.max(12, Math.min(rad, 42));
+  const headBox = { x: Math.max(0, Math.floor(cx - headR)), y: Math.max(0, Math.floor(cy - headR)), w: Math.min(W - Math.floor(cx - headR), Math.floor(headR*2)), h: Math.min(H - Math.floor(cy - headR), Math.floor(headR*2)) };
+
+  // --- 3) Sample colors from detected regions ---
+  const avgArea = (x0:number,y0:number,w:number,h:number) => {
+    const rect = sctx.getImageData(x0,y0,w,h).data; let r=0,g=0,b=0,n=0;
+    for(let i=0;i<rect.length;i+=4){ r+=rect[i]; g+=rect[i+1]; b+=rect[i+2]; n++; }
     return { r: Math.round(r/n), g: Math.round(g/n), b: Math.round(b/n) };
   };
+  // skin from center of head box
+  const skinRGB = avgArea(headBox.x + headBox.w*0.35, headBox.y + headBox.h*0.35, Math.max(1, Math.floor(headBox.w*0.3)), Math.max(1, Math.floor(headBox.h*0.3)));
+  // hair from a band above head center
+  const hairBandY = Math.max(0, headBox.y - Math.floor(headBox.h*0.35));
+  const hairRGB = avgArea(Math.max(0, headBox.x), hairBandY, Math.min(W - headBox.x, headBox.w), Math.min(H - hairBandY, Math.floor(headBox.h*0.35)) || 4);
+  // eyes from midline of head box
+  const eyesRGB = avgArea(headBox.x + headBox.w*0.3, headBox.y + headBox.h*0.45, Math.max(1, Math.floor(headBox.w*0.4)), Math.max(1, Math.floor(headBox.h*0.12)));
+
   const hex = (r:number,g:number,b:number)=>`#${[r,g,b].map(v=>v.toString(16).padStart(2,'0')).join('')}`;
-  const hairRGB = avgArea(24, 8, 80, 20);
-  const shirtRGB = avgArea(24, 84, 80, 24);
-  const tieRGB = avgArea(48, 72, 32, 24);
+  const palettes = {
+    skin: ["#F7D7C4","#E8B796","#D59C7B","#B97A5A","#8D5A3B","#6B4228"],
+    hair: ["#1B1B1B","#2E2E2E","#4A2F22","#6B4E3D","#915E2F","#C7A16A","#D7C9A3"],
+    eyes: ["#2A2A2A","#355C7D","#2F6B3F","#6B3F2F","#1E4D9A","#2C9A9A"],
+  } as const;
+  const dist = (a:{r:number,g:number,b:number}, b:{r:number,g:number,b:number}) => { const dr=a.r-b.r,dg=a.g-b.g,db=a.b-b.b; return dr*dr+dg*dg+db*db; };
+  const hexToRgb = (h:string) => ({ r: parseInt(h.slice(1,3),16), g: parseInt(h.slice(3,5),16), b: parseInt(h.slice(5,7),16) });
+  const nearest = (rgb:{r:number,g:number,b:number}, set:string[]) => set.reduce((best,cur)=> dist(rgb,hexToRgb(cur)) < dist(rgb,hexToRgb(best)) ? cur : best, set[0]);
 
-  const suit = "#1d2433";               // dark navy
-  const suitShadow = "#121826";
-  const shirt = "#f4f6fa";             // white shirt
-  const shirtShadow = "#dbe1ea";
-  const tie = hex(tieRGB.r, tieRGB.g, tieRGB.b);
-  const skinShadow = "#a27562";
+  const skin = nearest(skinRGB, palettes.skin);
+  const hair = nearest(hairRGB, palettes.hair);
+  const eyes = nearest(eyesRGB, palettes.eyes);
 
-  // --- Build pixel body sprite (business suit), 16x24 grid ---
+  // --- 4) Draw pixel body (business suit) ---
   const sw = 16, sh = 24;
   const sprite = document.createElement('canvas');
   sprite.width = sw; sprite.height = sh;
@@ -84,66 +130,53 @@ function makePixelAvatar(src: HTMLImageElement, outSize = 128, spriteScale = 8):
   const fill = (x:number,y:number,w:number,h:number,color:string)=>{ ctx.fillStyle=color; ctx.fillRect(x,y,w,h); };
   ctx.clearRect(0,0,sw,sh);
 
-  // Head area kept transparent (we will render the real head later on output canvas)
-  // Neck (2x1) to connect head and shirt
+  const suit = "#1d2433", suitShadow = "#121826", shirt = "#f4f6fa", shirtShadow = "#dbe1ea", tie = "#e53935";
+  const skinShadow = "#a27562";
+
+  // Neck (connects to head)
   fill(7,9,2,1, skinShadow);
-
-  // Torso with suit jacket and white shirt + tie (center gap 2px)
-  // Jacket outer borders
+  // Jacket + shirt + tie
   fill(3,10,1,7, suitShadow); fill(12,10,1,7, suitShadow);
-  // Jacket body
   fill(4,10,8,7, suit);
-  // Shirt visible in the middle
   fill(7,10,2,6, shirt);
-  // Tie (vertical stripe)
   fill(7,11,2,4, tie);
-  // Shirt collar suggestion
   fill(6,10,1,1, shirtShadow); fill(9,10,1,1, shirtShadow);
-
-  // Arms (suit sleeves) + small hands (1px)
+  // Arms + hands
   fill(3,11,1,4, suit); fill(12,11,1,4, suit);
   fill(3,15,1,1, skinShadow); fill(12,15,1,1, skinShadow);
-
-  // Belt
+  // Belt + pants + shoes
   fill(5,16,6,1, "#222222");
-
-  // Pants (dark)
-  fill(5,17,2,4, "#2e3a4e");
-  fill(9,17,2,4, "#2e3a4e");
-  // pant gap
+  fill(5,17,2,4, "#2e3a4e"); fill(9,17,2,4, "#2e3a4e");
   fill(7,17,2,1, "#1f2937");
+  fill(4,21,4,2, "#2b2b2b"); fill(8,21,4,2, "#2b2b2b");
 
-  // Shoes
-  fill(4,21,4,2, "#2b2b2b");
-  fill(8,21,4,2, "#2b2b2b");
+  // --- 5) Draw pixel head (8×8) using sampled colors, well-fitted ---
+  // Head grid anchored to sprite coordinates (4,1) → (11,8)
+  // clear head area to avoid bleed
+  // base skin block
+  fill(4,1,8,8, skin);
+  // ears
+  fill(3,4,1,2, skin); fill(12,4,1,2, skin);
+  // hair cap + sides
+  fill(3,1,10,3, hair); // fringe top
+  fill(3,4,2,2, hair);  // left side
+  fill(11,4,2,2, hair); // right side
+  // hair bottom line for depth
+  fill(4,0,8,1, hair);
+  // eyes
+  fill(6,5,1,1, eyes); fill(9,5,1,1, eyes);
+  // mouth
+  fill(7,7,2,1, "#6d4c41");
 
-  // --- Compose to output canvas ---
+  // --- 6) Scale to output with nearest-neighbor ---
   const out = document.createElement('canvas');
   out.width = outSize; out.height = outSize;
   const octx = out.getContext('2d')!; octx.imageSmoothingEnabled = false;
   const scale = Math.floor(Math.min(outSize/sprite.width, outSize/sprite.height));
   const w = sprite.width*scale, h = sprite.height*scale;
   const ox = Math.floor((outSize - w)/2); const oy = Math.floor((outSize - h)/2);
-
-  // Draw body first (no head on sprite)
   octx.clearRect(0,0,outSize,outSize);
   octx.drawImage(sprite, 0, 0, sprite.width, sprite.height, ox, oy, w, h);
-
-  // --- Render realistic circular head from selfie on top ---
-  // Map sprite head rect (x=4..11, y=1..8) to output pixels
-  const hx = ox + 4*scale; const hy = oy + 1*scale; const hw = 8*scale; const hh = 8*scale;
-  const cx = hx + hw/2; const cy = hy + hh/2; const r = Math.min(hw, hh)/2;
-
-  octx.save();
-  octx.imageSmoothingEnabled = true;
-  // circular clip
-  octx.beginPath(); octx.arc(cx, cy, r, 0, Math.PI*2); octx.closePath(); octx.clip();
-  // cover-fit draw from sample head area (center 80x80 → fit into circle)
-  const srcSize = 96; // larger than head to include hair
-  const sxo = (sample.width - srcSize)/2; const syo = (sample.height - srcSize)/2;
-  // ensure no smoothing artifacts on borders
-  octx.drawImage(sample, sxo, syo, srcSize, srcSize, hx, hy, hw, hh);
-  octx.restore();
 
   return out.toDataURL('image/png');
 }
