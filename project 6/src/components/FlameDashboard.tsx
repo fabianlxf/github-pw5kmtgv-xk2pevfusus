@@ -44,6 +44,72 @@ function stopMediaStream(stream: MediaStream | null) {
   try { stream?.getTracks().forEach(t => t.stop()); } catch {}
 }
 
+// ==== AI-powered pixel avatar (head) ====
+async function makePixelAvatarAI(srcEl: HTMLImageElement, outSize = 160): Promise<string> {
+  // 1) Grab a centered square frame from the source element
+  const vw = (srcEl as any).videoWidth || (srcEl as any).naturalWidth;
+  const vh = (srcEl as any).videoHeight || (srcEl as any).naturalHeight;
+  if (!vw || !vh) throw new Error('no video/natural size');
+  const size = Math.min(vw, vh);
+  const sx = Math.floor((vw - size) / 2);
+  const sy = Math.floor((vh - size) / 2);
+  const snap = document.createElement('canvas');
+  snap.width = 256; snap.height = 256; // send a decent face crop to the model
+  const sctx = snap.getContext('2d')!;
+  sctx.imageSmoothingEnabled = true;
+  sctx.drawImage(srcEl as any, sx, sy, size, size, 0, 0, snap.width, snap.height);
+
+  // 2) Send to backend → Gemini: expects PNG in, returns PNG (pixel-art head aligned to 8x8 grid, transparent bg)
+  const blob = await new Promise<Blob>((resolve) => snap.toBlob((b)=>resolve(b||new Blob()), 'image/png'));
+  const fd = new FormData();
+  fd.append('image', blob, 'selfie.png');
+  // optional hints for style
+  fd.append('grid', '8'); // 8x8 head grid target
+  fd.append('style', 'nes'); // playful hint; server may ignore
+
+  const res = await callApi('/api/pixelize-head', { method: 'POST', body: fd });
+  if (!res.ok) throw new Error('pixelize-head failed');
+  const headBlob = await res.blob();
+
+  // 3) Build suit body (same as local variant)
+  const sw = 16, sh = 24;
+  const sprite = document.createElement('canvas'); sprite.width = sw; sprite.height = sh;
+  const ctx = sprite.getContext('2d')!; ctx.imageSmoothingEnabled = false;
+  const fill = (x:number,y:number,w:number,h:number,c:string)=>{ ctx.fillStyle=c; ctx.fillRect(x,y,w,h); };
+  // body
+  const suit = '#1d2433', suitShadow = '#121826', shirt = '#f4f6fa', shirtShadow = '#dbe1ea', tie = '#e53935';
+  const skinShadow = '#a27562';
+  fill(7,9,2,1, skinShadow);
+  fill(3,10,1,7, suitShadow); fill(12,10,1,7, suitShadow);
+  fill(4,10,8,7, suit);
+  fill(7,10,2,6, shirt);
+  fill(7,11,2,4, tie);
+  fill(6,10,1,1, shirtShadow); fill(9,10,1,1, shirtShadow);
+  fill(3,11,1,4, suit); fill(12,11,1,4, suit);
+  fill(3,15,1,1, skinShadow); fill(12,15,1,1, skinShadow);
+  fill(5,16,6,1, '#222');
+  fill(5,17,2,4, '#2e3a4e'); fill(9,17,2,4, '#2e3a4e');
+  fill(7,17,2,1, '#1f2937');
+  fill(4,21,4,2, '#2b2b2b'); fill(8,21,4,2, '#2b2b2b');
+
+  // 4) Draw AI pixel head into the head slot (4..11,1..8)
+  const headImg = await createImageBitmap(headBlob).catch(async () => {
+    const url = URL.createObjectURL(headBlob); const img = new Image(); img.src = url; await img.decode(); URL.revokeObjectURL(url); return img as any;
+  });
+  // Clear slot and draw returned head cover-fit into 8x8
+  ctx.clearRect(4,1,8,8);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(headImg as any, 0, 0, (headImg as any).width, (headImg as any).height, 4, 1, 8, 8);
+
+  // 5) Scale to output
+  const out = document.createElement('canvas'); out.width = outSize; out.height = outSize;
+  const octx = out.getContext('2d')!; octx.imageSmoothingEnabled = false;
+  const scale = Math.floor(Math.min(outSize/sw, outSize/sh));
+  const w = sw*scale, h = sh*scale; const ox = Math.floor((outSize-w)/2), oy = Math.floor((outSize-h)/2);
+  octx.drawImage(sprite, 0, 0, sw, sh, ox, oy, w, h);
+  return out.toDataURL('image/png');
+}
+
 function makePixelAvatar(src: HTMLImageElement, outSize = 128, spriteScale = 8): string {
   // --- 1) Read square selfie to canvas for analysis ---
   const vw = (src as any).videoWidth || (src as any).naturalWidth;
@@ -509,10 +575,20 @@ export default function FlameDashboard({
   }
   function takeSelfie() {
     if (!videoRef.current) return;
-    const dataUrl = makePixelAvatar(videoRef.current as any as HTMLImageElement, 160, 36);
-    setAvatarUrl(dataUrl);
-    try { localStorage.setItem('flame.pixel.avatar', dataUrl); localStorage.setItem('flame.avatar.captured', '1'); } catch {}
-    cancelSelfie();
+    (async () => {
+      try {
+        const aiUrl = await makePixelAvatarAI(videoRef.current as any as HTMLImageElement, 160);
+        setAvatarUrl(aiUrl);
+        try { localStorage.setItem('flame.pixel.avatar', aiUrl); localStorage.setItem('flame.avatar.captured', '1'); } catch {}
+      } catch (err) {
+        console.warn('AI pixelize failed, using local fallback', err);
+        const dataUrl = makePixelAvatar(videoRef.current as any as HTMLImageElement, 160, 36);
+        setAvatarUrl(dataUrl);
+        try { localStorage.setItem('flame.pixel.avatar', dataUrl); localStorage.setItem('flame.avatar.captured', '1'); } catch {}
+      } finally {
+        cancelSelfie();
+      }
+    })();
   }
   React.useEffect(() => {
     try {
@@ -1017,7 +1093,7 @@ function stopRecording() {
       {showSelfieCapture && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-6">
           <div className={`w-full max-w-sm rounded-2xl overflow-hidden border ${isDarkMode ? 'bg-gray-900 border-white/10' : 'bg-white border-gray-200'}`}>
-            <div className="p-3 text-center font-medium">Pixel-Selfie</div>
+            <div className="p-3 text-center font-medium">Pixel-Selfie (KI) <span className="text-xs opacity-60">(AI-Processing kann 1–2 Sek. dauern)</span></div>
             <div className="p-3 flex items-center justify-center">
               <video ref={videoRef} autoPlay playsInline className="w-64 h-64 object-cover rounded-xl bg-black" />
             </div>
