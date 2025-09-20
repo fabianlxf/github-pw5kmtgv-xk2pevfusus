@@ -44,24 +44,134 @@ function stopMediaStream(stream: MediaStream | null) {
   try { stream?.getTracks().forEach(t => t.stop()); } catch {}
 }
 
-function makePixelAvatar(src: HTMLImageElement, outSize = 128, pixelSize = 32): string {
-  const small = document.createElement('canvas');
-  small.width = pixelSize; small.height = pixelSize;
-  const sctx = small.getContext('2d')!;
+function makePixelAvatar(src: HTMLImageElement, outSize = 128, spriteScale = 8): string {
+  // 1) Read selfie (square center crop) into a small canvas to sample colors
   const vw = (src as any).videoWidth || (src as any).naturalWidth;
   const vh = (src as any).videoHeight || (src as any).naturalHeight;
-  const minSide = Math.min(vw, vh);
-  const sx = (vw - minSide) / 2;
-  const sy = (vh - minSide) / 2;
-  sctx.imageSmoothingEnabled = false;
-  sctx.drawImage(src as any, sx, sy, minSide, minSide, 0, 0, pixelSize, pixelSize);
+  const size = Math.min(vw, vh);
+  const sx = (vw - size) / 2;
+  const sy = (vh - size) / 2;
 
-  const big = document.createElement('canvas');
-  big.width = outSize; big.height = outSize;
-  const bctx = big.getContext('2d')!;
-  bctx.imageSmoothingEnabled = false;
-  bctx.drawImage(small, 0, 0, pixelSize, pixelSize, 0, 0, outSize, outSize);
-  return big.toDataURL('image/png');
+  const sample = document.createElement('canvas');
+  sample.width = 64; sample.height = 64; // enough to sample colors
+  const sctx = sample.getContext('2d')!;
+  sctx.imageSmoothingEnabled = true;
+  sctx.drawImage(src as any, sx, sy, size, size, 0, 0, 64, 64);
+
+  // --- Helpers ---
+  const getPixel = (x: number, y: number) => {
+    const d = sctx.getImageData(x, y, 1, 1).data; return { r: d[0], g: d[1], b: d[2] };
+  };
+  const avgArea = (x0: number, y0: number, w: number, h: number) => {
+    const d = sctx.getImageData(x0, y0, w, h).data;
+    let r=0,g=0,b=0, n = (w*h);
+    for (let i=0;i<d.length;i+=4){ r+=d[i]; g+=d[i+1]; b+=d[i+2]; }
+    return { r: Math.round(r/(n)), g: Math.round(g/(n)), b: Math.round(b/(n)) };
+  };
+  const toHex = ({r,g,b}:{r:number;g:number;b:number}) => `#${[r,g,b].map(v=>v.toString(16).padStart(2,'0')).join('')}`;
+
+  // 2) Naive feature sampling (robust enough for selfie):
+  // face center for skin, top band for hair, horizontal eye line for eyes, chest band for shirt
+  const skinRGB = avgArea(24, 24, 16, 16); // center
+  const hairRGB = avgArea(16, 4, 32, 10);  // top
+  const eyesRGB = avgArea(22, 22, 20, 6);  // slightly above center
+  const shirtRGB = avgArea(16, 44, 32, 16);// bottom band
+
+  // 3) Quantize to a small, clean palette so sprite looks cohesive
+  const palettes = {
+    skin: ["#F7D7C4","#E8B796","#D59C7B","#B97A5A","#8D5A3B","#6B4228"],
+    hair: ["#1B1B1B","#2E2E2E","#4A2F22","#6B4E3D","#915E2F","#C7A16A","#D7C9A3"],
+    eyes: ["#2A2A2A","#355C7D","#2F6B3F","#6B3F2F","#1E4D9A","#2C9A9A"],
+    shirt: ["#2D7FF9","#E23B3B","#27A745","#F5A623","#7F3BF2","#444C56","#808080"],
+    pants: ["#7AA0C8","#4E6C8C","#3C4A5A"],
+    shoes: ["#333333","#555555","#777777"],
+  } as const;
+
+  const dist = (a:{r:number,g:number,b:number}, b:{r:number,g:number,b:number}) => {
+    const dr=a.r-b.r,dg=a.g-b.g,db=a.b-b.b; return dr*dr+dg*dg+db*db;
+  };
+  const hexToRgb = (h:string) => ({
+    r: parseInt(h.slice(1,3),16), g: parseInt(h.slice(3,5),16), b: parseInt(h.slice(5,7),16)
+  });
+  const nearest = (rgb:{r:number,g:number,b:number}, list:string[]) => {
+    let best=list[0], bestD=Infinity; for (const h of list){ const d=dist(rgb, hexToRgb(h)); if(d<bestD){bestD=d; best=h;} } return best;
+  };
+
+  const skin = nearest(skinRGB, palettes.skin);
+  const hair = nearest(hairRGB, palettes.hair);
+  const eyes = nearest(eyesRGB, palettes.eyes);
+  const shirt = nearest(shirtRGB, palettes.shirt);
+  const pants = palettes.pants[0];
+  const shoes = palettes.shoes[0];
+
+  // 4) Draw a tiny pixel sprite (full body, 16x24) and scale up crisply
+  const sw = 16, sh = 24; // sprite grid
+  const sprite = document.createElement('canvas');
+  sprite.width = sw; sprite.height = sh;
+  const ctx = sprite.getContext('2d')!;
+  const fill = (x:number,y:number,w:number,h:number,color:string)=>{ ctx.fillStyle=color; ctx.fillRect(x,y,w,h); };
+  ctx.imageSmoothingEnabled = false;
+
+  // transparent background
+  ctx.clearRect(0,0,sw,sh);
+
+  // --- Head (8x8), positioned at (4,1)
+  fill(4,1,8,8, skin);
+  // Ears
+  fill(3,4,1,2, skin); fill(12,4,1,2, skin);
+  // Hair cap
+  fill(3,1,10,3, hair); // top fringe
+  fill(3,4,2,2, hair);  // sides
+  fill(11,4,2,2, hair);
+  // Hair shading bottom line
+  fill(4,0,8,1, hair);
+
+  // Eyes (1x1 pixels)
+  fill(6,5,1,1, eyes); fill(9,5,1,1, eyes);
+  // Mouth
+  fill(7,7,2,1, "#7a4b3a");
+
+  // --- Neck
+  fill(7,9,2,1, skin);
+
+  // --- Torso (jacket over shirt stripes)
+  // Shirt
+  fill(5,10,6,5, shirt);
+  // Jacket (darker edge)
+  fill(4,10,1,6, "#2b2b2b"); fill(11,10,1,6, "#2b2b2b");
+  fill(5,10,1,6, "#3b3b3b"); fill(10,10,1,6, "#3b3b3b");
+  // open jacket gap
+  fill(7,10,2,6, shirt);
+
+  // Arms (skin + jacket sleeves)
+  fill(3,11,1,4, "#3b3b3b"); fill(12,11,1,4, "#3b3b3b");
+  fill(3,15,1,1, skin); fill(12,15,1,1, skin);
+
+  // --- Belt line
+  fill(5,16,6,1, "#222222");
+
+  // --- Pants
+  fill(5,17,2,4, pants); // left leg
+  fill(9,17,2,4, pants); // right leg
+  // gap
+  fill(7,17,2,1, "#1f2937");
+
+  // --- Shoes
+  fill(4,21,4,2, shoes); // left
+  fill(8,21,4,2, shoes); // right
+
+  // 5) Scale up to requested output size with nearest-neighbor
+  const out = document.createElement('canvas');
+  out.width = outSize; out.height = outSize;
+  const octx = out.getContext('2d')!;
+  octx.imageSmoothingEnabled = false;
+  const scale = Math.floor(Math.min(outSize/sprite.width, outSize/sprite.height));
+  const w = sprite.width*scale, h = sprite.height*scale;
+  const ox = Math.floor((outSize - w)/2); const oy = Math.floor((outSize - h)/2);
+  octx.clearRect(0,0,outSize,outSize);
+  octx.drawImage(sprite, 0, 0, sprite.width, sprite.height, ox, oy, w, h);
+
+  return out.toDataURL('image/png');
 }
 
 export function getFlameState(
